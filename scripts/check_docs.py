@@ -18,7 +18,24 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = sorted([ROOT / "AGENTS.md", *ROOT.glob("docs/memory/**/*.md")])
 
 errors: list[str] = []
+warnings: list[str] = []
 
+
+
+def iter_outside_fences(text: str):
+    """Отдаёт строки, не входящие в блок ```...```
+
+    Код-блоки — это примеры и листинги. Имена файлов внутри них автор
+    показывает как иллюстрацию, они не обязаны существовать в проекте.
+    Проверке подлежит только инлайн-код в прозе.
+    """
+    in_fence = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            yield line
 
 def check_links() -> int:
     """Проверяет, что каждый путь в обратных кавычках ведёт на существующий файл.
@@ -49,7 +66,10 @@ def check_links() -> int:
 
     seen = 0
     for md in DOCS:
-        for link in pattern.findall(md.read_text(encoding="utf-8")):
+        text = md.read_text(encoding="utf-8")
+        # только проза: содержимое код-блоков — это примеры
+        prose = "\n".join(iter_outside_fences(text))
+        for link in pattern.findall(prose):
             seen += 1
 
             # шаг 1: явные пути
@@ -68,8 +88,23 @@ def check_links() -> int:
                 # неоднозначно, но не ошибка: уточнить путь было бы лучше
                 continue
 
-            # шаг 3: нигде нет — настоящая ошибка
-            errors.append(f"{md.relative_to(ROOT)}: битая ссылка `{link}`")
+            # шаг 3: нигде нет.
+            #
+            # Разница между ошибкой и предупреждением:
+            #   * полный путь (`backend/app/foo.py`) — почти наверняка
+            #     настоящая ссылка. Если файла нет, документация врёт.
+            #   * короткое имя (`foo.py`) в прозе часто оказывается примером,
+            #     когда автор объясняет работу самого валидатора. Блокировать
+            #     коммит из-за иллюстрации неправильно.
+            #
+            # Поэтому: путь со слэшем — ошибка, голое имя — предупреждение.
+            if "/" in link:
+                errors.append(f"{md.relative_to(ROOT)}: битая ссылка `{link}`")
+            else:
+                warnings.append(
+                    f"{md.relative_to(ROOT)}: имя `{link}` не найдено в проекте "
+                    f"(если это пример, а не ссылка — можно игнорировать)"
+                )
     return seen
 
 
@@ -143,6 +178,12 @@ def main() -> int:
     print(f"  блоков кода       {blocks}")
     print(f"  документов        {docs}")
     print(f"  итераций          {iters}\n")
+
+    if warnings:
+        print(f"Предупреждения ({len(warnings)}):")
+        for w in warnings:
+            print(f"  ⚠ {w}")
+        print()
 
     if errors:
         print(f"Проблемы ({len(errors)}):")
