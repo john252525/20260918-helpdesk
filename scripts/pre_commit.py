@@ -6,10 +6,11 @@
 документацией памяти.
 
 Проверки:
-  1. Слой памяти: ссылки, блоки кода, обязательные разделы (scripts/check_docs.py)
-  2. Синтаксис Python: приложение импортируется
-  3. Синтаксис JavaScript: frontend/app.js парсится
-  4. STATE.md обновлён, если менялся код
+  1. Слой памяти: ссылки, блоки кода, обязательные разделы (check_docs.py)
+  2. Тесты самого валидатора на временной копии
+  3. Синтаксис Python: приложение импортируется
+  4. Синтаксис JavaScript: frontend/app.js парсится
+  5. STATE.md обновлён, если менялся код (предупреждение)
 
 Обход (когда хук мешает по делу):
     git commit --no-verify -m "..."
@@ -18,12 +19,10 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
-import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 
-# код, правка которого требует обновить STATE.md
 CODE_GLOBS = ("backend/app/**/*.py", "frontend/*.js", "frontend/*.css", "frontend/*.html")
 STATE_FILE = "docs/memory/STATE.md"
 
@@ -50,8 +49,27 @@ def check_docs() -> None:
         [str(VENV_PYTHON), str(script)], cwd=ROOT, capture_output=True, text=True
     )
     if result.returncode != 0:
-        tail = "\n".join(result.stdout.splitlines()[-12:])
-        errors.append(f"check_docs.py сообщает о проблемах:\n{tail}")
+        tail = chr(10).join(result.stdout.splitlines()[-12:])
+        errors.append(f"check_docs.py сообщает о проблемах:{chr(10)}{tail}")
+
+
+def check_docs_selftest() -> None:
+    """Прогоняет тесты валидатора на временной копии.
+
+    Проверяет, что сам валидатор ведёт себя правильно: ловит битые ссылки,
+    пропускает примеры в код-блоках, замечает незакрытые блоки. Если он
+    сломан — узнать надо до коммита, а не когда он пропустит настоящую
+    ошибку.
+    """
+    script = ROOT / "scripts" / "test_check_docs.py"
+    if not script.exists():
+        return
+    result = subprocess.run(
+        [str(VENV_PYTHON), str(script)], cwd=ROOT, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        tail = chr(10).join(result.stdout.splitlines()[-6:])
+        errors.append(f"Тесты валидатора не прошли:{chr(10)}{tail}")
 
 
 def check_python_imports() -> None:
@@ -61,8 +79,8 @@ def check_python_imports() -> None:
         cwd=ROOT, capture_output=True, text=True,
     )
     if result.returncode != 0:
-        tail = "\n".join(result.stderr.splitlines()[-10:])
-        errors.append(f"Импорт приложения падает:\n{tail}")
+        tail = chr(10).join(result.stderr.splitlines()[-10:])
+        errors.append(f"Импорт приложения падает:{chr(10)}{tail}")
 
 
 def check_js_syntax() -> None:
@@ -74,16 +92,12 @@ def check_js_syntax() -> None:
         ["node", "--check", str(js)], capture_output=True, text=True
     )
     if result.returncode != 0:
-        tail = "\n".join(result.stderr.splitlines()[-8:])
-        errors.append(f"frontend/app.js не парсится:\n{tail}")
+        tail = chr(10).join(result.stderr.splitlines()[-8:])
+        errors.append(f"frontend/app.js не парсится:{chr(10)}{tail}")
 
 
 def check_state_updated(staged: list[str]) -> None:
-    """Правило проекта: правка кода без записи в STATE.md — потерянный контекст.
-
-    Это единственное место, где написано «где мы сейчас». Если его не обновлять,
-    следующий агент после обнуления контекста не поймёт, что происходило.
-    """
+    """Правило проекта: правка кода без записи в STATE.md — потерянный контекст."""
     code_changed = any(
         any(pathlib.PurePath(f).match(glob) for glob in CODE_GLOBS)
         for f in staged
@@ -92,8 +106,8 @@ def check_state_updated(staged: list[str]) -> None:
 
     if code_changed and not state_changed:
         warnings.append(
-            "Изменён код, но docs/memory/STATE.md не тронут.\n"
-            "    Коммит пройдёт, но следующий агент не узнает, что изменилось.\n"
+            "Изменён код, но docs/memory/STATE.md не тронут." + chr(10) +
+            "    Коммит пройдёт, но следующий агент не узнает, что изменилось." + chr(10) +
             "    Обнови STATE.md или обойди проверку: git commit --no-verify"
         )
 
@@ -108,24 +122,29 @@ def main() -> int:
     print(f"pre-commit: проверяю {len(staged)} файл(ов)")
 
     check_docs()
+    check_docs_selftest()
     check_python_imports()
     check_js_syntax()
     check_state_updated(staged)
 
     if errors:
-        print("\n" + "=" * 64)
+        print()
+        print("=" * 64)
         print("КОММИТ ОСТАНОВЛЕН — надо исправить:")
         print("=" * 64)
         for e in errors:
-            print(f"\n  ✗ {e}")
-        print("\n" + "=" * 64)
+            print()
+            print(f"  x {e}")
+        print()
+        print("=" * 64)
         print("После исправления: git add -A && git commit")
         print("Обойти проверки:    git commit --no-verify -m \"...\"")
         print("=" * 64)
         return 1
 
     for w in warnings:
-        print(f"\n  ⚠ {w}")
+        print()
+        print(f"  ! {w}")
 
     print("pre-commit: все проверки пройдены")
     return 0

@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
 
     bootstrap_admin_email: str = "admin@helpdesk.local"
-    bootstrap_admin_password: str = "admin12345"
+    # пустой пароль означает «не создавать bootstrap-админа автоматически».
+    # Так развернутая копия не поднимается с известным паролем по умолчанию.
+    bootstrap_admin_password: str = ""
     bootstrap_admin_name: str = "Administrator"
 
     public_base_url: str = "http://localhost:8091"

@@ -10,12 +10,27 @@
 """
 from __future__ import annotations
 
+import argparse
 import pathlib
 import re
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-DOCS = sorted([ROOT / "AGENTS.md", *ROOT.glob("docs/memory/**/*.md")])
+# Значения по умолчанию; ROOT может быть переопределён аргументом --root.
+# Это нужно тестам: они работают с копией во временной папке, а не
+# с боевыми документами.
+DEFAULT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = DEFAULT_ROOT
+DOCS: list[pathlib.Path] = []
+
+# каталоги, которые не участвуют в поиске файлов по имени
+SKIP_DIRS = {".venv", ".git", "data", "__pycache__", "node_modules"}
+
+
+def configure(root: pathlib.Path) -> None:
+    """Устанавливает корень проверки и собирает список документов."""
+    global ROOT, DOCS
+    ROOT = root.resolve()
+    DOCS = sorted([ROOT / "AGENTS.md", *ROOT.glob("docs/memory/**/*.md")])
 
 errors: list[str] = []
 warnings: list[str] = []
@@ -80,7 +95,7 @@ def check_links() -> int:
             name = pathlib.PurePath(link).name
             found = [
                 f for f in ROOT.rglob(name)
-                if ".venv" not in f.parts and ".git" not in f.parts and "data" not in f.parts
+                if not (set(f.parts) & SKIP_DIRS)
             ]
             if len(found) == 1:
                 continue
@@ -167,8 +182,24 @@ def check_iterations() -> int:
     return len(iters)
 
 
-def main() -> int:
-    print(f"Проверка слоя памяти: {len(DOCS)} документов\n")
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Проверка слоя памяти: ссылки, блоки кода, обязательные разделы."
+    )
+    parser.add_argument(
+        "--root", type=pathlib.Path, default=DEFAULT_ROOT,
+        help="каталог проекта (по умолчанию — корень этого скрипта)",
+    )
+    parser.add_argument(
+        "--quiet", action="store_true",
+        help="печатать только итог и ошибки",
+    )
+    args = parser.parse_args(argv)
+    configure(args.root)
+
+    if not args.quiet:
+        print(f"Проверка слоя памяти: {len(DOCS)} документов")
+        print(f"  корень: {ROOT}\n")
     links = check_links()
     blocks = check_code_blocks()
     docs = check_structure()
@@ -196,4 +227,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
