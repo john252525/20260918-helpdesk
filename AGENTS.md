@@ -2,6 +2,15 @@
 
 Точка входа для агента. Прочитай это первым делом, затем — файлы в указанном порядке.
 
+## Перед началом работы
+
+Установи git-хуки, если их нет:
+
+    ./.venv/bin/python scripts/install_hooks.py
+
+Проверка: `ls .git/hooks/pre-commit`. Хук запускает проверки автоматически
+при каждом коммите. Правила обхода — в `docs/memory/CONVENTIONS.md`.
+
 ## Порядок чтения при старте
 
 1. `docs/memory/PROJECT.md` — что за продукт, стек, архитектура
@@ -41,6 +50,7 @@ node --check frontend/app.js
 3. Создать `docs/memory/iterations/YYYY-MM-DD-NNN-<slug>.md` по шаблону ниже
 4. Архитектурное решение — дописать в `docs/memory/DECISIONS.md`
 5. Новый техдолг или TODO — в `docs/memory/BACKLOG.md`
+6. `git add -A && git commit` — хук прогонит проверки перед коммитом
 
 ## Шаблон файла итерации
 

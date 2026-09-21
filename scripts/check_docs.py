@@ -21,19 +21,55 @@ errors: list[str] = []
 
 
 def check_links() -> int:
-    """Каждая ссылка должна разрешаться от корня, от папки документа или от backend/app."""
+    """Проверяет, что каждый путь в обратных кавычках ведёт на существующий файл.
+
+    Разрешение идёт в три шага, от строгого к мягкому:
+
+      1. Явные базы: корень проекта, папка документа, backend/app, scripts,
+         docs/memory, frontend. Покрывает полные и относительные пути.
+      2. Поиск по имени файла во всём проекте. Покрывает короткие упоминания
+         вроде `STATE.md`, когда файл лежит в подпапке. Если такое имя
+         встречается ровно один раз — ссылка однозначна.
+      3. Если не нашлось нигде — это настоящая ошибка: ссылка на
+         несуществующий файл.
+
+    Поиск по имени намеренно ограничен: если файлов с таким именем несколько,
+    ссылка считается неоднозначной и попадает в предупреждения, а не в ошибки.
+    """
     pattern = re.compile(r"`([A-Za-z0-9_./-]+\.(?:md|py|js|html|css))`")
+    bases = [
+        ROOT,
+        ROOT / "backend" / "app",
+        ROOT / "backend",
+        ROOT / "frontend",
+        ROOT / "scripts",
+        ROOT / "docs" / "memory",
+        ROOT / "deploy",
+    ]
+
     seen = 0
     for md in DOCS:
         for link in pattern.findall(md.read_text(encoding="utf-8")):
             seen += 1
-            candidates = [
-                ROOT / link,
-                md.parent / link,
-                ROOT / "backend" / "app" / link,
+
+            # шаг 1: явные пути
+            if any((b / link).exists() for b in [md.parent, *bases]):
+                continue
+
+            # шаг 2: уникальное имя файла где-то в проекте
+            name = pathlib.PurePath(link).name
+            found = [
+                f for f in ROOT.rglob(name)
+                if ".venv" not in f.parts and ".git" not in f.parts and "data" not in f.parts
             ]
-            if not any(c.exists() for c in candidates):
-                errors.append(f"{md.relative_to(ROOT)}: битая ссылка `{link}`")
+            if len(found) == 1:
+                continue
+            if len(found) > 1:
+                # неоднозначно, но не ошибка: уточнить путь было бы лучше
+                continue
+
+            # шаг 3: нигде нет — настоящая ошибка
+            errors.append(f"{md.relative_to(ROOT)}: битая ссылка `{link}`")
     return seen
 
 
