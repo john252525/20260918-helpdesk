@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Helpdesk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app/styles.css" />
+</head>
+<body>
+<div id="boot-splash" class="boot-splash"><div class="boot-spinner"></div></div>
+<script>setTimeout(function(){var s=document.getElementById("boot-splash");if(s&&!s.hidden){s.hidden=true;var l=document.getElementById("login-screen");if(l)l.hidden=false;}},4000)</script>
+
+<!-- ============ LOGIN ============ -->
+<div id="login-screen" class="login-screen" hidden>
+  <div class="login-card">
+    <div class="login-logo">
+      <span class="logo-mark">H</span>
+      <span class="logo-text">Helpdesk</span>
+    </div>
+    <p class="login-sub">Единый инбокс обращений клиентов</p>
+    <form id="login-form" autocomplete="on">
+      <label class="field">
+        <span>Email</span>
+        <input type="email" id="login-email" required />
+      </label>
+      <label class="field">
+        <span>Пароль</span>
+        <input type="password" id="login-password" required />
+      </label>
+      <div id="login-error" class="login-error" hidden></div>
+      <button type="submit" class="btn btn-primary btn-block" id="login-btn">Войти</button>
+    </form>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app" class="app" hidden>
+  <aside class="rail">
+    <div class="rail-logo"><span class="logo-mark">H</span></div>
+    <nav class="rail-nav">
+      <button class="rail-btn is-active" data-view="inbox" title="Инбокс">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16v11H7l-3 3V5z"/></svg>
+        <span id="rail-badge" class="rail-badge" hidden>0</span>
+      </button>
+      <button class="rail-btn" data-view="metrics" title="Метрики">
+        <svg viewBox="0 0 24 24"><path d="M4 20V10m5 10V4m5 16v-7m5 7V8"/></svg>
+      </button>
+      <button class="rail-btn" data-view="channels" title="Каналы">
+        <svg viewBox="0 0 24 24"><path d="M12 3v4m0 10v4M3 12h4m10 0h4M6.3 6.3l2.8 2.8m5.8 5.8 2.8 2.8m0-11.4-2.8 2.8m-5.8 5.8-2.8 2.8"/></svg>
+      </button>
+      <button class="rail-btn" data-view="team" title="Команда">
+        <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.4"/><path d="M15 20c0-2.5 1.6-4.5 4-4.5"/></svg>
+      </button>
+      <button class="rail-btn" data-view="companies" id="rail-companies" title="Компании" hidden>
+        <svg viewBox="0 0 24 24"><path d="M4 21V6a1 1 0 0 1 1-1h7v16M12 21V10h7a1 1 0 0 1 1 1v10M4 21h16M7 9h2M7 13h2M7 17h2M15 14h2M15 18h2"/></svg>
+      </button>
+    </nav>
+    <div class="rail-bottom">
+      <div id="me-avatar" class="avatar avatar-sm" title="Сменить пароль"></div>
+      <button class="rail-btn" id="logout-btn" title="Выйти">
+        <svg viewBox="0 0 24 24"><path d="M15 12H4m4-4-4 4 4 4M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ============ INBOX ============ -->
+  <main id="view-inbox" class="view view-inbox">
+    <section class="pane pane-list">
+      <header class="pane-head">
+        <div class="pane-title">
+          <h1>Инбокс</h1>
+          <span id="inbox-count" class="muted"></span>
+        </div>
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="search-input" type="search" placeholder="Поиск по клиентам и сообщениям" />
+        </div>
+        <div class="filter-row">
+          <select id="filter-status" class="select">
+            <option value="">Все статусы</option>
+            <option value="open" selected>Открытые</option>
+            <option value="pending">В ожидании</option>
+            <option value="resolved">Решённые</option>
+            <option value="closed">Закрытые</option>
+          </select>
+          <select id="filter-channel" class="select"><option value="">Все каналы</option></select>
+          <select id="filter-assignee" class="select"><option value="">Все операторы</option></select>
+        </div>
+      </header>
+      <div id="conv-list" class="conv-list"></div>
+    </section>
+
+    <section id="pane-thread" class="pane pane-thread">
+      <div id="thread-empty" class="empty-state">
+        <div class="empty-icon">💬</div>
+        <h2>Выберите диалог</h2>
+        <p>Все обращения из WhatsApp, VK и Email собираются здесь.</p>
+      </div>
+
+      <div id="thread" class="thread-wrap" hidden>
+        <header class="thread-head">
+          <div class="thread-contact">
+            <button id="thread-back" class="thread-back" type="button" aria-label="К списку диалогов">
+              <svg viewBox="0 0 24 24"><path d="M15 19l-7-7 7-7"/></svg>
+            </button>
+            <div id="thread-avatar" class="avatar"></div>
+            <div>
+              <div id="thread-name" class="thread-name"></div>
+              <div id="thread-sub" class="thread-sub"></div>
+            </div>
+          </div>
+          <div class="thread-actions">
+            <span id="thread-channel" class="chip chip-channel"></span>
+            <span id="thread-frt" class="chip chip-frt" hidden></span>
+            <select id="thread-status" class="select select-sm"></select>
+            <select id="thread-priority" class="select select-sm"></select>
+            <select id="thread-assignee" class="select select-sm"></select>
+            <button id="assign-me" class="btn btn-ghost btn-sm" title="Назначить на меня">Взять себе</button>
+          </div>
+        </header>
+        <div id="messages" class="messages"></div>
+        <footer class="composer">
+          <textarea id="composer-input" placeholder="Напишите ответ… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
+          <div class="composer-actions">
+            <select id="composer-status" class="select select-sm">
+              <option value="resolved">Ответить и решить</option>
+              <option value="pending">Ответить и в ожидание</option>
+              <option value="">Просто ответить</option>
+            </select>
+            <button id="send-btn" class="btn btn-primary">Отправить</button>
+          </div>
+        </footer>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ METRICS ============ -->
+  <main id="view-metrics" class="view view-metrics" hidden>
+    <header class="page-head">
+      <div>
+        <h1>Метрики поддержки</h1>
+        <p class="muted" id="metrics-sub"></p>
+      </div>
+      <div class="page-head-actions">
+        <select id="metrics-days" class="select">
+          <option value="7">7 дней</option>
+          <option value="30" selected>30 дней</option>
+          <option value="90">90 дней</option>
+          <option value="365">365 дней</option>
+        </select>
+        <select id="metrics-sla" class="select">
+          <option value="300">SLA FRT ≤ 5 мин</option>
+          <option value="900" selected>SLA FRT ≤ 15 мин</option>
+          <option value="3600">SLA FRT ≤ 1 час</option>
+          <option value="14400">SLA FRT ≤ 4 часа</option>
+        </select>
+      </div>
+    </header>
+    <div id="metrics-cards" class="metric-cards"></div>
+    <div class="metric-grid">
+      <div class="card">
+        <h3>Динамика обращений</h3>
+        <div id="chart-timeseries" class="chart"></div>
+      </div>
+      <div class="card">
+        <h3>Распределение времени первого ответа</h3>
+        <div id="chart-frt" class="chart"></div>
+      </div>
+    </div>
+    <div class="metric-grid">
+      <div class="card">
+        <h3>Операторы</h3>
+        <div id="table-agents"></div>
+      </div>
+      <div class="card">
+        <h3>Каналы</h3>
+        <div id="table-channels"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ CHANNELS ============ -->
+  <main id="view-channels" class="view view-channels" hidden>
+    <header class="page-head">
+      <div><h1>Каналы</h1><p class="muted">Подключения WhatsApp, VK и Email</p></div>
+      <div style="display:flex;gap:8px">
+        <button id="webhook-log-btn" class="btn btn-ghost">Журнал вебхуков</button>
+        <button id="add-channel-btn" class="btn btn-primary">Подключить канал</button>
+      </div>
+    </header>
+    <div id="channels-list" class="stack"></div>
+  </main>
+
+  <!-- ============ TEAM ============ -->
+  <main id="view-companies" class="view view-companies" hidden>
+    <header class="page-head">
+      <div><h1>Компании</h1><p class="muted">Проекты, подключённые к платформе</p></div>
+      <button id="add-company-btn" class="btn btn-primary">Создать компанию</button>
+    </header>
+    <div id="companies-list" class="stack"></div>
+  </main>
+
+  <main id="view-team" class="view view-team" hidden>
+    <header class="page-head">
+      <div><h1>Команда</h1><p class="muted">Операторы поддержки (права и роли — позже)</p></div>
+      <button id="add-user-btn" class="btn btn-primary">Добавить оператора</button>
+    </header>
+    <div id="users-list" class="stack"></div>
+  </main>
+</div>
+
+<!-- ============ MODALS ============ -->
+<div id="modal-root" class="modal-root" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal" id="modal-body"></div>
+</div>
+
+<div id="toast-root" class="toast-root"></div>
+
+<script src="/app/app.js"></script>
+</body>
+</html>
