@@ -553,7 +553,16 @@
           el('div', { class: 'sub' }, 'Вебхук: ', el('span', { class: 'code' }, webhook)),
           el('div', { class: 'sub' }, ch.type === 'whatsapp' ? 'Входящие: webhook · Исходящие: sendMessage'
             : ch.type === 'vk' ? 'Входящие: Callback API / Long Poll · Исходящие: messages.send'
-            : 'Входящие: IMAP-поллер · Исходящие: SMTP')),
+            : 'Входящие: IMAP-поллер · Исходящие: SMTP'),
+          (ch.type === 'vk' && ch.config && ch.config.needs_send_token)
+            ? el('div', { class: 'sub warn-line' },
+                'Ответы не уходят: нужен ключ группы ',
+                el('button', {
+                  class: 'btn btn-ghost btn-sm',
+                  onclick: () => openSendTokenModal(ch.id,
+                    'VK не принимает токен этого канала для отправки. Вставьте ключ группы.'),
+                }, 'Добавить ключ'))
+            : null),
         el('div', { style: 'display:flex;align-items:center;gap:12px' },
           el('span', { class: 'muted' }, ch.enabled ? 'включён' : 'выключен'),
           toggle,
@@ -1102,14 +1111,59 @@
     const status = params.get('vk_oauth');
     if (!status) return;
     const reason = params.get('reason');
+    const warn = params.get('warn');
+    const channelId = params.get('channel_id');
     // drop the query so an accidental refresh does not repeat the action
     history.replaceState(null, '', location.pathname);
     if (status === 'error') {
       toast(reason || 'Не удалось подключиться через ВК', 'err');
       return;
     }
-    toast('Группа подключена через ВК');
     loadChannels();
+    if (warn && channelId) {
+      // Receiving works, sending does not: VK ID community tokens are
+      // refused on the messages namespace. Ask for a group key to send with.
+      openSendTokenModal(channelId, warn);
+    } else {
+      toast('Группа подключена через ВК');
+    }
+  }
+
+  function openSendTokenModal(channelId, warn) {
+    const form = el('form', { class: 'modal-form' },
+      el('h2', {}, 'Ключ для ответов'),
+      el('div', { class: 'modal-result err' }, warn),
+      el('label', { class: 'field' },
+        el('span', {}, 'Ключ доступа группы'),
+        el('input', { id: 'vk-send-token', placeholder: 'начинается на vk1.a.…' }),
+        el('span', { class: 'field-hint' },
+          'Создаётся в самой группе: Управление → Работа с API → Создать ключ. '
+          + 'Отметьте «Сообщения сообщества» и «Управление сообществом». '
+          + 'Приём сообщений уже работает, ключ нужен только для отправки.')),
+      el('div', { class: 'modal-actions' },
+        el('button', { type: 'button', class: 'btn btn-ghost', 'data-close': '' }, 'Позже'),
+        el('button', { type: 'submit', class: 'btn btn-primary', id: 'vk-send-save' }, 'Сохранить')));
+    showModal(form);
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('#vk-send-save');
+      const token = ($('#vk-send-token').value || '').trim();
+      if (!token) { toast('Вставьте ключ', 'err'); return; }
+      btn.disabled = true; btn.textContent = 'Проверяю…';
+      try {
+        await api('/channels/vk/oauth/send-token', {
+          method: 'POST',
+          body: { channel_id: Number(channelId), access_token: token },
+        });
+        closeModal();
+        toast('Ключ сохранён, ответы будут уходить от имени группы');
+        loadChannels();
+      } catch (err) {
+        btn.disabled = false; btn.textContent = 'Сохранить';
+        toast(err.message, 'err');
+      }
+    });
   }
 
   function channelField(name, label, placeholder, hint, type = 'text') {

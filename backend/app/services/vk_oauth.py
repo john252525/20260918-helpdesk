@@ -245,6 +245,43 @@ def parse_community_tokens(payload: dict) -> list[dict]:
     return out
 
 
+def describe_exchange(payload: dict) -> dict:
+    """Structural summary of the token response. Never logs token values."""
+    info = {
+        "keys": sorted(payload.keys()),
+        "groups": [
+            {"group_id": str(g.get("group_id")), "token_len": len(g.get("access_token") or "")}
+            for g in (payload.get("groups") or [])
+        ],
+        "keyed": {k: len(v) for k, v in payload.items()
+                  if k.startswith("access_token_") and isinstance(v, str)},
+    }
+    if "access_token" in payload:
+        info["top_access_token_len"] = len(payload.get("access_token") or "")
+    for f in ("expires_in", "user_id"):
+        if f in payload:
+            info[f] = payload.get(f)
+    return info
+
+
+def can_use_messages(token: str) -> bool:
+    """True if VK accepts this token for community message methods.
+
+    `messages.getConversations` is cheap and returns error 1051 for tokens VK
+    does not accept on the messages namespace -- the same wall a reply would
+    hit later. Better to know at connect time.
+    """
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                f"{VK_API}/messages.getConversations",
+                data={"access_token": token, "v": settings.vk_api_version, "count": 1},
+            )
+        return "response" in resp.json()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def fetch_group_info(group_id: str, access_token: str) -> dict:
     """Readable name and address; purely cosmetic, never fatal."""
     try:

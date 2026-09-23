@@ -20,7 +20,8 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import User
-from ..schemas import VKOAuthStart
+from ..models import Channel
+from ..schemas import ChannelOut, VKOAuthStart, VKSendToken
 from ..security import require_admin
 from ..services import vk_oauth
 from ..services.vk_connect import save_vk_channel, unique_channel_name
@@ -118,6 +119,10 @@ def callback(
             reason="VK не выдал токен для этой группы. Проверьте, что вы её администратор.",
         )
 
+    log.info("VK OAuth exchange: %s", vk_oauth.describe_exchange(token_payload))
+    can_send = vk_oauth.can_use_messages(token)
+    log.info("VK OAuth token group=%s can_send=%s", group_id, can_send)
+
     info = vk_oauth.fetch_group_info(group_id, token)
 
     # persist through the shared path, so the manual and OAuth flows converge
@@ -131,6 +136,8 @@ def callback(
             "access_token": token,
             "screen_name": info.get("screen_name") or "",
             "oauth": True,
+            "can_send": can_send,
+            "needs_send_token": not can_send,
         }
         ch = save_vk_channel(db, workspace_id=workspace_id, name=name, config=config)
         channel_id = ch.id
@@ -144,4 +151,46 @@ def callback(
         db.close()
 
     log.info("VK channel %s connected via OAuth for workspace %s", channel_id, workspace_id)
-    return _frontend_redirect(vk_oauth="ok", channel_id=channel_id)
+    warn = None
+    if not can_send:
+        warn = "Канал принимает сообщения, но VK отклонил отправку от имени группы. Ответы из интерфейса не уйдут — нужен ключ группы (ручной режим)."
+    return _frontend_redirect(vk_oauth="ok", channel_id=channel_id, warn=warn)
+
+
+@router.post("/send-token", response_model=ChannelOut,
+             summary="Привязать ключ группы для отправки")
+def attach_send_token(
+    body: VKSendToken,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """Store a group key for outgoing messages on an OAuth-connected channel.
+
+    VK ID community tokens are accepted for receiving but rejected on the
+    messages namespace (error 1051), so replies need a key created in the
+    community settings. The key is validated read-only, without sending
+    anything anywhere.
+    """
+    ch = db.get(Channel, body.channel_id)
+    if ch is None or ch.type != "vk" or (
+        user.role != "superadmin" and ch.workspace_id != user.workspace_id
+    ):
+        raise HTTPException(status_code=404, detail="Канал не найден")
+
+    token = (body.access_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Пустой ключ")
+
+    if not vk_oauth.can_use_messages(token):
+        raise HTTPException(
+            status_code=400,
+            detail="VK не принимает этот ключ для отправки сообщений. Убедитесь, "
+                   "что ключ создан в настройках этой группы (Управление → Работа с API) "
+                   "с правами «Сообщения сообщества» и «Управление сообществом».",
+        )
+
+    ch.config = {**(ch.config or {}), "send_token": token, "needs_send_token": False}
+    db.commit()
+    db.refresh(ch)
+    log.info("VK channel %s: send token attached", ch.id)
+    return ch

@@ -27,7 +27,13 @@ class VKAdapter(ChannelAdapter):
 
     def __init__(self, channel: Channel, config: dict):
         super().__init__(channel, config)
-        self.token = self.config.get("access_token") or settings.vk_access_token or ""
+        # VK ID community tokens obtained over OAuth are accepted for
+        # receiving (Long Poll works) but VK rejects them on the messages
+        # namespace with error 1051. A group key created in the community
+        # settings does send, so it wins for outgoing when both are present.
+        self.token = (self.config.get("send_token")
+                      or self.config.get("access_token")
+                      or settings.vk_access_token or "")
         self.group_id = str(self.config.get("group_id") or settings.vk_group_id or "")
         self.api_version = str(self.config.get("api_version") or settings.vk_api_version or "5.199")
 

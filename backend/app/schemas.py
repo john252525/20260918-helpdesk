@@ -169,6 +169,16 @@ class VKOAuthStart(BaseModel):
     workspace_id: Optional[int] = None
 
 
+class VKSendToken(BaseModel):
+    """Group key used for outgoing VK messages.
+
+    Needed only when the channel was connected over OAuth: VK ID community
+    tokens receive fine but are refused on the messages namespace (1051).
+    """
+    channel_id: int
+    access_token: str = Field(min_length=1)
+
+
 class ChannelCreate(BaseModel):
     type: str
     name: str
