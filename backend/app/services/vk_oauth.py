@@ -154,9 +154,10 @@ def parse_group_input(raw: str) -> dict:
 def resolve_screen_name(screen_name: str) -> dict:
     """Map a readable community name to its numeric id.
 
-    Needs a token: `utils.resolveScreenName` rejects anonymous calls in
-    API 5.199. The service token is the natural choice; without it only
-    numeric links work, and the caller tells the admin so.
+    `groups.getById` accepts a screen name directly and works with the
+    application service token -- unlike `utils.resolveScreenName`, which VK
+    blocks for service tokens (error 1051). Without a service token only
+    numeric links work, and the caller says so plainly.
     """
     token = (settings.vk_service_token or "").strip()
     if not token:
@@ -166,9 +167,9 @@ def resolve_screen_name(screen_name: str) -> dict:
     try:
         with httpx.Client(timeout=15) as client:
             resp = client.post(
-                f"{VK_API}/utils.resolveScreenName",
-                data={"screen_name": screen_name, "access_token": token,
-                      "v": settings.vk_api_version},
+                f"{VK_API}/groups.getById",
+                data={"group_id": screen_name, "access_token": token,
+                      "v": settings.vk_api_version, "fields": "screen_name"},
             )
         data = resp.json()
     except Exception as exc:  # noqa: BLE001
@@ -176,11 +177,15 @@ def resolve_screen_name(screen_name: str) -> dict:
 
     if "error" in data:
         err = data["error"]
-        return {"ok": False, "detail": f"VK {err.get('error_code')}: {err.get('error_msg')}"}
-    obj = data.get("response") or {}
-    if not obj or obj.get("type") not in ("group", "page"):
+        code = err.get("error_code")
+        if code == 100:
+            return {"ok": False, "detail": "Сообщество с таким адресом не найдено. "
+                                           "Проверьте ссылку или вставьте ID группы."}
+        return {"ok": False, "detail": f"VK {code}: {err.get('error_msg')}"}
+    groups = ((data.get("response") or {}).get("groups")) or []
+    if not groups:
         return {"ok": False, "detail": "Сообщество с таким адресом не найдено"}
-    return {"ok": True, "group_id": str(obj.get("object_id"))}
+    return {"ok": True, "group_id": str(groups[0].get("id"))}
 
 
 def resolve_group(raw: str) -> dict:
