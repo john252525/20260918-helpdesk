@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     vk_secret: str = ""
     vk_api_version: str = "5.199"
 
+    # VK OAuth (Authorization Code Flow). The app secret lives only here,
+    # never in the browser. redirect_uri must be registered on dev.vk.com;
+    # empty value means "build it from public_base_url".
+    vk_app_id: str = "54786017"
+    vk_client_secret: str = ""
+    vk_oauth_redirect_uri: str = ""
+    vk_oauth_frontend_url: str = "/app/"
+
     # Email
     smtp_host: str = ""
     smtp_port: int = 465

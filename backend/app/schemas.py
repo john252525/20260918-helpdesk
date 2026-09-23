@@ -157,6 +157,19 @@ class ChannelUpdate(BaseModel):
     config: Optional[dict] = None
 
 
+class VKOAuthConnect(BaseModel):
+    """Pick one of the communities found after VK OAuth.
+
+    `ticket` is the short-lived handle for the token obtained in the callback;
+    the token itself never travels to the browser. `workspace_id` is only
+    meaningful for a superadmin, who has no company of their own.
+    """
+    ticket: str
+    group_id: str
+    name: Optional[str] = None
+    workspace_id: Optional[int] = None
+
+
 class ChannelCreate(BaseModel):
     type: str
     name: str

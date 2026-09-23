@@ -174,6 +174,7 @@
     // the companies section is a platform-level tool
     if (isSuperadmin()) $('#rail-companies').hidden = false;
     boot();
+    handleVkOauthReturn();
   }
 
   /* ---------------- boot ---------------- */
@@ -1058,6 +1059,121 @@
     });
   }
 
+  /* ---------------- VK OAuth (Authorization Code Flow) ----------------
+     The community is picked from the list VK returns; the group id is never
+     typed by hand. The manual token form stays right below as the fallback,
+     because VK issues a user token over OAuth while receiving messages
+     normally needs a community token. */
+  async function startVkOAuth() {
+    const btn = $('#ch-vk-oauth');
+    if (btn) { btn.disabled = true; btn.textContent = 'Перехожу в VK…'; }
+    try {
+      const r = await api('/channels/vk/oauth/start');
+      window.location.href = r.authorize_url;
+    } catch (e) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Подключить через ВК'; }
+      toast(e.message, 'err');
+    }
+  }
+
+  async function handleVkOauthReturn() {
+    const params = new URLSearchParams(location.search);
+    const status = params.get('vk_oauth');
+    if (!status) return;
+    const ticket = params.get('ticket');
+    const reason = params.get('reason');
+    // drop the query so an accidental refresh does not repeat the action
+    history.replaceState(null, '', location.pathname);
+    if (status === 'error') {
+      toast(reason || 'Не удалось подключиться через ВК', 'err');
+      return;
+    }
+    if (!ticket) {
+      toast('VK не вернул данные авторизации', 'err');
+      return;
+    }
+    openVkGroupPicker(ticket);
+  }
+
+  async function openVkGroupPicker(ticket) {
+    const body = el('div', { class: 'modal-form' },
+      el('h2', {}, 'Выберите сообщество'),
+      el('div', { class: 'modal-hint' },
+        'Вход через ВК выполнен. Осталось выбрать группу, к которой подключить приём сообщений.'),
+      el('div', { id: 'vk-groups', class: 'vk-groups' },
+        el('div', { class: 'muted' }, 'Загружаю список…')));
+    showModal(body);
+
+    let data;
+    try {
+      data = await api('/channels/vk/oauth/groups?ticket=' + encodeURIComponent(ticket));
+    } catch (e) {
+      const root = $('#vk-groups');
+      root.innerHTML = '';
+      root.append(el('div', { class: 'modal-result err' }, e.message));
+      return;
+    }
+
+    const root = $('#vk-groups');
+    root.innerHTML = '';
+    const groups = data.groups || [];
+    if (!groups.length) {
+      root.append(el('div', { class: 'modal-result err' },
+        'Среди ваших сообществ нет групп с правами администратора.'));
+      return;
+    }
+    for (const g of groups) {
+      root.append(el('label', { class: 'vk-group' },
+        el('input', { type: 'radio', name: 'vk-group', value: g.id }),
+        el('span', { class: 'vk-group-name' }, g.name || ('Группа ' + g.id)),
+        el('span', { class: 'vk-group-id muted' }, 'id ' + g.id)));
+    }
+    root.append(
+      el('label', { class: 'field' },
+        el('span', {}, 'Название канала'),
+        el('input', { id: 'vk-group-channel-name', placeholder: 'по умолчанию — название группы' })),
+      el('div', { class: 'modal-actions' },
+        el('button', { type: 'button', class: 'btn btn-ghost', 'data-close': '' }, 'Отмена'),
+        el('button', { type: 'button', class: 'btn btn-primary', id: 'vk-group-connect' }, 'Подключить')));
+
+    const first = root.querySelector('input[name="vk-group"]');
+    if (first) first.checked = true;
+    $('#vk-group-connect').addEventListener('click', () => connectVkGroup(ticket));
+  }
+
+  async function connectVkGroup(ticket) {
+    const root = $('#vk-groups');
+    const picked = root.querySelector('input[name="vk-group"]:checked');
+    if (!picked) { toast('Выберите сообщество', 'err'); return; }
+    const name = ($('#vk-group-channel-name').value || '').trim();
+    const btn = $('#vk-group-connect');
+    btn.disabled = true; btn.textContent = 'Подключаю…';
+    try {
+      await api('/channels/vk/oauth/connect', {
+        method: 'POST',
+        body: { ticket, group_id: picked.value, name: name || null },
+      });
+      closeModal();
+      await loadChannels();
+      toast('Группа подключена через ВК');
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Подключить';
+      // 409 means VK wants a community token: fall back to the manual form,
+      // with the group id already filled in so only the key is left to paste
+      if (String(e.message).indexOf('ключ группы') !== -1) {
+        closeModal();
+        toast(e.message, 'err');
+        openChannelModal();
+        const gi = document.querySelector('#ch-fields [name="group_id"]');
+        if (gi) gi.value = picked.value;
+        const tok = document.querySelector('#ch-fields [name="access_token"]');
+        if (tok) tok.focus();
+      } else {
+        toast(e.message, 'err');
+      }
+    }
+  }
+
   function channelField(name, label, placeholder, hint, type = 'text') {
     return el('label', { class: 'field' },
       el('span', {}, label),
@@ -1072,6 +1188,13 @@
 
     if (type === 'vk') {
       root.append(
+        el('div', { class: 'oauth-block' },
+          el('div', { class: 'oauth-row' },
+            el('button', { type: 'button', class: 'btn btn-primary', id: 'ch-vk-oauth' },
+              'Подключить через ВК'),
+            el('span', { class: 'oauth-note' },
+              'Выберите сообщество в окне VK — данные подставятся сами')),
+          el('div', { class: 'oauth-divider' }, el('span', {}, 'или подключить вручную'))),
         channelField('group_id', 'ID группы VK', 'например, 123456789',
           'Числа из адреса группы: vk.com/club123456789 → 123456789. ' +
           'Либо Управление → Настройки → Адрес.'),
@@ -1092,6 +1215,7 @@
           'Управление → Работа с API → Long Poll API.',
         ),
       );
+      $('#ch-vk-oauth').addEventListener('click', startVkOAuth);
     } else if (type === 'whatsapp') {
       root.append(
         channelField('base_url', 'Адрес API провайдера', 'https://api.ваш-провайдер.ru'),

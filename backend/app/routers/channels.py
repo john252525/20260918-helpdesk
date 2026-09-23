@@ -8,6 +8,7 @@ from ..config import settings
 from ..database import get_db
 from ..models import Channel, Conversation, Event, Message, User, WebhookLog
 from ..schemas import ChannelCreate, ChannelOut, ChannelUpdate
+from ..services.vk_connect import save_vk_channel
 from ..security import get_current_user, require_admin
 
 router = APIRouter(prefix="/channels", tags=["channels"])
@@ -26,48 +27,6 @@ def list_channels(
     return list(db.scalars(stmt.order_by(Channel.id)))
 
 
-def _setup_vk_long_poll(cfg: dict) -> dict:
-    """Enable Long Poll reception for a VK group.
-
-    VK requires this to be switched on before `groups.getLongPollServer` will
-    return a server. It is done here so a freshly connected channel starts
-    receiving immediately, without the operator visiting VK settings.
-
-    Never raises: connecting a channel must not fail because VK is unhappy.
-    """
-    group_id = str(cfg.get("group_id") or "").strip()
-    token = str(cfg.get("access_token") or "").strip()
-    if not group_id or not token:
-        return {"enabled": False, "detail": "нет group_id или токена"}
-
-    import httpx
-    try:
-        with httpx.Client(timeout=20) as client:
-            # enabled=1 is a separate parameter from the event flags; without
-            # it VK accepts the call but leaves Long Poll off
-            r = client.post(
-                "https://api.vk.com/method/groups.setLongPollSettings",
-                data={"group_id": group_id, "access_token": token,
-                      "v": settings.vk_api_version, "enabled": 1, "message_new": 1},
-            )
-        data = r.json()
-    except Exception as exc:  # noqa: BLE001
-        return {"enabled": False, "detail": f"нет связи с VK: {exc}"}
-
-    if "error" in data:
-        err = data["error"]
-        code = err.get("error_code")
-        hint = ""
-        if code in (15, 27):
-            hint = (" Токену не хватает прав: при создании ключа отметьте "
-                    "«Управление сообществом» (manage) и «Сообщения сообщества» (messages), "
-                    "либо включите Long Poll вручную: Управление → Работа с API → Long Poll API.")
-        return {"enabled": False,
-                "detail": f"VK ответил ошибкой {code}: {err.get('error_msg')}.{hint}"}
-
-    return {"enabled": True, "detail": "Long Poll включён"}
-
-
 @router.post("", response_model=ChannelOut, status_code=201, summary="Создать канал")
 def create_channel(
     payload: ChannelCreate,
@@ -84,11 +43,19 @@ def create_channel(
             raise HTTPException(status_code=400,
                                 detail="Суперадмин должен указать workspace_id")
 
-    config = dict(payload.config or {})
-    long_poll = None
+    # VK goes through the save path shared with the OAuth flow (ADR-021).
+    # The manual form keeps its previous behaviour: same checks, same
+    # messages, same 409 on a duplicate name.
     if payload.type == "vk":
-        long_poll = _setup_vk_long_poll(config)
-        config["long_poll"] = long_poll
+        return save_vk_channel(
+            db,
+            workspace_id=workspace_id,
+            name=payload.name,
+            config=payload.config or {},
+            enabled=payload.enabled,
+        )
+
+    config = dict(payload.config or {})
 
     # a channel name must be unique inside its workspace; a plain commit() would
     # surface as an opaque 500, so check first and answer 409
@@ -123,13 +90,6 @@ def create_channel(
             detail=f"Канал с названием «{payload.name}» уже есть в этой компании",
         )
     db.refresh(ch)
-
-    if long_poll and not long_poll.get("enabled"):
-        # the channel exists, but receiving will not work until VK is fixed;
-        # surface it in the log so it is not a silent failure
-        import logging
-        logging.getLogger("channels").warning(
-            "VK channel %s: Long Poll not enabled: %s", ch.id, long_poll.get("detail"))
 
     return ch
 

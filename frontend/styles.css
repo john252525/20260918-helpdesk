@@ -507,3 +507,25 @@ td.num,th.num{text-align:right;padding-right:0}
 .btn-danger{background:var(--red);color:#fff}
 .btn-danger:hover{background:#cf3b40}
 .btn-danger:disabled{opacity:.5;cursor:not-allowed}
+
+/* ---------------- VK OAuth block ---------------- */
+.oauth-block{margin-bottom:6px}
+.oauth-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.oauth-row .btn{flex:0 0 auto}
+.oauth-note{font-size:11.5px;color:var(--muted);line-height:1.4}
+.oauth-divider{
+  display:flex;align-items:center;gap:10px;
+  margin:16px 0 14px;font-size:11.5px;color:var(--muted);
+}
+.oauth-divider::before,.oauth-divider::after{
+  content:'';flex:1;height:1px;background:var(--border);
+}
+.vk-groups{margin-top:10px;display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto}
+.vk-group{
+  display:flex;align-items:center;gap:10px;cursor:pointer;
+  padding:10px 12px;border:1px solid var(--border-strong);border-radius:9px;
+}
+.vk-group:hover{background:var(--bg-subtle)}
+.vk-group input{flex:0 0 auto}
+.vk-group-name{flex:1;font-weight:600;font-size:13px}
+.vk-group-id{font-size:11.5px}
