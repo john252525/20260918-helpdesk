@@ -157,16 +157,15 @@ class ChannelUpdate(BaseModel):
     config: Optional[dict] = None
 
 
-class VKOAuthConnect(BaseModel):
-    """Pick one of the communities found after VK OAuth.
+class VKOAuthStart(BaseModel):
+    """Kick off community authorization for one VK group.
 
-    `ticket` is the short-lived handle for the token obtained in the callback;
-    the token itself never travels to the browser. `workspace_id` is only
-    meaningful for a superadmin, who has no company of their own.
+    `group` accepts a link, a `club123`-style handle or a numeric id; the
+    server resolves it to a number. `workspace_id` is only meaningful for a
+    superadmin, who has no company of their own.
     """
-    ticket: str
-    group_id: str
-    name: Optional[str] = None
+    group: str = Field(min_length=1, max_length=255)
+    name: Optional[str] = Field(default=None, max_length=255)
     workspace_id: Optional[int] = None
 
 

@@ -1,23 +1,25 @@
-"""VK OAuth (Authorization Code Flow) for connecting a community.
+"""VK community authorization (OAuth Authorization Code Flow).
 
-The application secret is used **only** on the server, and the access token
-obtained in the callback never reaches the browser: it is kept in a
-short-lived in-memory ticket until the admin picks a community.
+Why this shape. The application (`vk_app_id`) is a VK ID app whose only
+community-related scope is the community Access token flow: it requires
+`group_ids` up front and returns a *community* token (see ADR-022). It cannot
+list the user's communities -- that needs the `groups` scope, which VK grants
+only on a support request. So the admin points at one community (link or id),
+and everything else is server side.
 
-Community token caveat. OAuth issues a *user* access token. Sending and
-receiving messages on behalf of a community normally requires a *community*
-token, which VK does not hand out over OAuth. `check_group_rights` reports
-whether the user token is enough; when it is not, the caller offers the
-manual token form instead. The token still authenticates the user, so the
-fallback is one field short of done.
+The application secret lives only here. The token obtained in the callback
+never reaches the browser: it is written straight into the channel config
+through the same `save_vk_channel` path the manual form uses, so nothing
+downstream can tell the two flows apart.
 """
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -31,24 +33,21 @@ VK_OAUTH_AUTHORIZE = "https://oauth.vk.com/authorize"
 VK_OAUTH_ACCESS_TOKEN = "https://oauth.vk.com/access_token"
 VK_API = "https://api.vk.com/method"
 
-# manage -- administer the community, messages -- send/receive, offline --
-# a long-lived token (otherwise VK expires it in a day)
-SCOPE = "manage,messages,offline"
+# community tokens allow exactly these scopes; offline is NOT among them
+SCOPE = "manage,messages"
 STATE_TTL_SECONDS = 600
-TICKET_TTL_SECONDS = 600
 
-# Process-local stores. The service runs a single uvicorn worker, so a plain
-# dict is enough. A restart only forces the admin to repeat the login.
 _lock = threading.Lock()
 _used_jti: dict[str, float] = {}
-_tickets: dict[str, dict] = {}
+
+# vk.com/club123, m.vk.com/public123, vk.ru/event123, bare /123 ...
+_LINK_RE = re.compile(r"(?:https?://)?(?:m\.)?(?:vk\.com|vk\.ru|vkontakte\.ru)/([^/?#\s]+)", re.I)
+_PREFIXED_RE = re.compile(r"^(?:club|public|event)(\d+)$", re.I)
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def redirect_uri() -> str:
-    """The callback URI registered on dev.vk.com.
-
-    Must match byte for byte, otherwise VK rejects the exchange.
-    """
+    """Callback URI; must match the app settings on VK byte for byte."""
     configured = (settings.vk_oauth_redirect_uri or "").strip()
     if configured:
         return configured
@@ -59,17 +58,16 @@ def frontend_url() -> str:
     return (settings.vk_oauth_frontend_url or "/app/").strip()
 
 
-def build_authorize_url(state: str, group_ids: Optional[str] = None) -> str:
+def build_authorize_url(state: str, group_id: str) -> str:
     params = {
         "client_id": settings.vk_app_id,
         "redirect_uri": redirect_uri(),
         "scope": SCOPE,
+        "group_ids": group_id,          # mandatory for the community flow
         "response_type": "code",
         "state": state,
         "v": settings.vk_api_version,
     }
-    if group_ids:
-        params["group_ids"] = group_ids
     return VK_OAUTH_AUTHORIZE + "?" + urlencode(params)
 
 
@@ -77,11 +75,20 @@ def build_authorize_url(state: str, group_ids: Optional[str] = None) -> str:
 # CSRF state
 # ---------------------------------------------------------------------------
 
-def make_state(user_id: int, workspace_id: Optional[int]) -> str:
+def make_state(user_id: int, workspace_id: Optional[int], group_id: str,
+               channel_name: Optional[str] = None) -> str:
+    """Signed, single-use state.
+
+    Carries the target community so the callback does not have to trust any
+    unsigned query parameter. The channel name is kept too, so a name typed
+    in the form survives the round trip through VK.
+    """
     now = int(time.time())
     payload = {
         "sub": str(user_id),
         "wid": workspace_id,
+        "gid": str(group_id),
+        "name": channel_name or None,
         "jti": secrets.token_urlsafe(16),
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,
@@ -117,14 +124,81 @@ def consume_state(state: Optional[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Group link / id parsing
+# ---------------------------------------------------------------------------
+
+def parse_group_input(raw: str) -> dict:
+    """Turn whatever the admin typed into a group id, or a name to resolve.
+
+    Accepts `club123`, `public123`, `123`, `-123`, full links with either a
+    numeric path or a human-readable screen name.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return {"ok": False, "detail": "Укажите ссылку на группу"}
+    if s.startswith("-"):
+        s = s[1:]
+    m = _LINK_RE.search(s)
+    if m:
+        s = m.group(1)
+    if s.isdigit():
+        return {"ok": True, "group_id": s}
+    mp = _PREFIXED_RE.match(s)
+    if mp:
+        return {"ok": True, "group_id": mp.group(1)}
+    if _NAME_RE.match(s):
+        return {"ok": False, "needs_resolve": True, "screen_name": s}
+    return {"ok": False, "detail": "Не похоже на ссылку или ID группы"}
+
+
+def resolve_screen_name(screen_name: str) -> dict:
+    """Map a readable community name to its numeric id.
+
+    Needs a token: `utils.resolveScreenName` rejects anonymous calls in
+    API 5.199. The service token is the natural choice; without it only
+    numeric links work, and the caller tells the admin so.
+    """
+    token = (settings.vk_service_token or "").strip()
+    if not token:
+        return {"ok": False,
+                "detail": "Для ссылок с коротким именем нужен сервисный ключ приложения. "
+                          "Вставьте ссылку вида vk.com/club123456789 или числовой ID."}
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                f"{VK_API}/utils.resolveScreenName",
+                data={"screen_name": screen_name, "access_token": token,
+                      "v": settings.vk_api_version},
+            )
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "detail": f"Нет связи с VK: {exc}"}
+
+    if "error" in data:
+        err = data["error"]
+        return {"ok": False, "detail": f"VK {err.get('error_code')}: {err.get('error_msg')}"}
+    obj = data.get("response") or {}
+    if not obj or obj.get("type") not in ("group", "page"):
+        return {"ok": False, "detail": "Сообщество с таким адресом не найдено"}
+    return {"ok": True, "group_id": str(obj.get("object_id"))}
+
+
+def resolve_group(raw: str) -> dict:
+    """Full resolution: numeric kept as is, short name via VK."""
+    parsed = parse_group_input(raw)
+    if parsed.get("ok"):
+        return parsed
+    if parsed.get("needs_resolve"):
+        return resolve_screen_name(parsed["screen_name"])
+    return parsed
+
+
+# ---------------------------------------------------------------------------
 # VK calls
 # ---------------------------------------------------------------------------
 
 def exchange_code(code: str) -> dict:
-    """Swap the authorization code for a user access token.
-
-    Server side only: the application secret never leaves this function.
-    """
+    """Swap the authorization code for community token(s). Server side only."""
     if not settings.vk_client_secret:
         raise RuntimeError("VK client_secret не настроен на сервере")
     data = {
@@ -139,119 +213,47 @@ def exchange_code(code: str) -> dict:
         payload = resp.json()
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Нет связи с VK: {exc}")
-    if not isinstance(payload, dict) or "access_token" not in payload:
-        desc = (payload or {}).get("error_description") or (payload or {}).get("error") or "code отклонён"
+    if not isinstance(payload, dict) or "error" in payload or "error_description" in payload:
+        desc = (payload or {}).get("error_description") or (payload or {}).get("error") or "код отклонён"
         raise RuntimeError(f"VK отклонил обмен кода: {desc}")
     return payload
 
 
-def get_admin_groups(access_token: str) -> list[dict]:
-    """Communities where the user is an admin.
+def parse_community_tokens(payload: dict) -> list[dict]:
+    """Pull `{group_id, access_token}` pairs out of the exchange response.
 
-    `filter=admin` does the filtering on the VK side, and `extended=1` brings
-    names back, so the SPA can render a picker without extra calls.
+    VK returns a `groups` array; older shapes used `access_token_<id>` keys,
+    so both are accepted.
     """
-    params = {
-        "access_token": access_token,
-        "v": settings.vk_api_version,
-        "filter": "admin",
-        "extended": 1,
-        "fields": "photo_100,members_count",
-    }
+    out: list[dict] = []
+    for item in payload.get("groups") or []:
+        gid = str(item.get("group_id") or "").lstrip("-")
+        tok = item.get("access_token") or ""
+        if gid and tok:
+            out.append({"group_id": gid, "access_token": tok})
+    if out:
+        return out
+    for key, value in payload.items():
+        m = re.match(r"access_token_-?(\d+)$", key)
+        if m and value:
+            out.append({"group_id": m.group(1), "access_token": value})
+    return out
+
+
+def fetch_group_info(group_id: str, access_token: str) -> dict:
+    """Readable name and address; purely cosmetic, never fatal."""
     try:
-        with httpx.Client(timeout=20) as client:
-            resp = client.post(f"{VK_API}/groups.get", data=params)
-        data = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Нет связи с VK: {exc}")
-    if "error" in data:
-        err = data["error"]
-        raise RuntimeError(f"VK {err.get('error_code')}: {err.get('error_msg')}")
-    items = ((data.get("response") or {}).get("items")) or []
-    return [
-        {
-            "id": str(g.get("id")),
-            "name": g.get("name") or "",
-            "screen_name": g.get("screen_name") or "",
-            "photo": g.get("photo_100") or "",
-        }
-        for g in items
-    ]
-
-
-def check_group_rights(access_token: str, group_id: str) -> dict:
-    """Can this token run Long Poll for the group?
-
-    A user token frequently cannot: most group methods want a community
-    token. That is a soft result (`needs_community_token`), not an error --
-    the caller offers the manual token form as the fallback.
-    """
-    try:
-        with httpx.Client(timeout=20) as client:
+        with httpx.Client(timeout=15) as client:
             resp = client.post(
-                f"{VK_API}/groups.getLongPollSettings",
+                f"{VK_API}/groups.getById",
                 data={"group_id": group_id, "access_token": access_token,
-                      "v": settings.vk_api_version},
+                      "v": settings.vk_api_version, "fields": "photo_100,screen_name"},
             )
         data = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "detail": f"Нет связи с VK: {exc}"}
-
-    if "error" in data:
-        err = data["error"]
-        code = err.get("error_code")
-        if code in (15, 27):
-            return {"ok": False, "needs_community_token": True,
-                    "detail": "Для приёма сообщений VK требует ключ группы"}
-        if code == 100:
-            # Parameters are off -- usually means Long Poll was never enabled.
-            return {"ok": True, "detail": "Long Poll будет включён при подключении"}
-        return {"ok": False, "detail": f"VK {code}: {err.get('error_msg')}"}
-
-    lp = data.get("response") or {}
-    if not lp.get("is_enabled"):
-        return {"ok": True, "detail": "Long Poll будет включён при подключении"}
-    if not (lp.get("events") or {}).get("message_new"):
-        return {"ok": True, "detail": "Событие «новое сообщение» включится при подключении"}
-    return {"ok": True, "detail": "Приём сообщений настроен"}
-
-
-# ---------------------------------------------------------------------------
-# Short-lived tickets: hold the token between "authorized" and "pick a group"
-# ---------------------------------------------------------------------------
-
-def create_ticket(user_id: int, workspace_id: Optional[int], access_token: str,
-                  groups: list[dict]) -> str:
-    ticket = secrets.token_urlsafe(32)
-    now = time.time()
-    with _lock:
-        for k, v in list(_tickets.items()):
-            if v["exp"] < now:
-                _tickets.pop(k, None)
-        _tickets[ticket] = {
-            "user_id": user_id,
-            "workspace_id": workspace_id,
-            "access_token": access_token,
-            "groups": groups,
-            "exp": now + TICKET_TTL_SECONDS,
-        }
-    return ticket
-
-
-def get_ticket(ticket: Optional[str], user_id: int) -> dict:
-    if not ticket:
-        raise ValueError("Не указан ticket авторизации")
-    with _lock:
-        payload = _tickets.get(ticket)
-    if payload is None or payload["exp"] < time.time():
-        raise ValueError("Сессия авторизации истекла, начните заново")
-    if payload.get("user_id") != user_id:
-        raise ValueError("Ticket принадлежит другому пользователю")
-    return payload
-
-
-def drop_ticket(ticket: Optional[str]) -> None:
-    if not ticket:
-        return
-    with _lock:
-        _tickets.pop(ticket, None)
+    except Exception:  # noqa: BLE001
+        return {}
+    groups = ((data.get("response") or {}).get("groups")) or []
+    if not groups:
+        return {}
+    g = groups[0]
+    return {"name": g.get("name") or "", "screen_name": g.get("screen_name") or ""}
