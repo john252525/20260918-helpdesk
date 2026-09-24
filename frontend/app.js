@@ -394,8 +394,13 @@
         lastDay = day;
         root.append(el('div', { class: 'day-divider' }, `${day}, ${new Date(m.created_at).toLocaleDateString('ru-RU')}`));
       }
-      const out = m.direction === 'outbound';
-      const author = m.author_name || (out ? 'Оператор' : 'Клиент');
+      // A reply sent from the owner's phone arrives as an outbound webhook.
+      // It is shown on the incoming side so it is distinguishable from what
+      // went out through this app, and labelled accordingly.
+      const external = !!(m.meta && m.meta.external);
+      const out = m.direction === 'outbound' && !external;
+      const author = external ? 'С телефона'
+        : (m.author_name || (out ? 'Оператор' : 'Клиент'));
       const bubble = el('div', { class: 'msg-bubble' + (m.status === 'failed' ? ' is-failed' : '') }, m.body || '');
       const meta = el('div', { class: 'msg-meta' },
         el('span', { class: 'msg-author' }, author),
@@ -406,7 +411,9 @@
         meta.append(el('span', { class: 'msg-status' + (m.status === 'failed' ? ' is-failed' : '') }, label));
       }
       if (m.error) meta.append(el('span', { class: 'msg-status is-failed', title: m.error }, '⚠'));
-      root.append(el('div', { class: 'msg ' + (out ? 'msg-out' : 'msg-in') },
+      root.append(el('div', {
+        class: 'msg ' + (out ? 'msg-out' : 'msg-in') + (external ? ' msg-external' : ''),
+      },
         el('div', { class: 'msg-avatar', style: `background:${colorFor(author)}` }, initials(author)),
         el('div', { class: 'msg-bubblewrap' }, meta, bubble)));
     }

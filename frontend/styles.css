@@ -559,3 +559,10 @@ td.num,th.num{text-align:right;padding-right:0}
 }
 .wa-loader-sm{width:14px;height:14px;border-width:2px;vertical-align:-2px}
 .modal-actions-wrap{flex-wrap:wrap}
+
+/* A reply sent from the owner's phone: incoming side, distinct outline */
+.msg-external .msg-bubble{
+  background:var(--bg-subtle);color:var(--text);
+  border-style:dashed;border-color:var(--border-strong);
+}
+.msg-external .msg-author{color:var(--amber)}
