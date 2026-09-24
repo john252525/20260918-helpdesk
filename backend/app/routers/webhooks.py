@@ -11,7 +11,7 @@ from ..config import settings
 from ..database import get_db
 from ..models import Channel, Conversation, Message, User, WebhookLog
 from ..security import get_current_user
-from ..services.ingest import ingest_inbound
+from ..services.ingest import ingest_inbound, ingest_outbound_external
 from ..channels import whatsapp as whatsapp_providers
 
 log = logging.getLogger("webhooks")
@@ -90,6 +90,23 @@ async def whatsapp_webhook(channel_id: int, secret: str, request: Request,
         for item in items:
             if item.get("status_update"):
                 _apply_message_status(db, channel, item)
+                continue
+            if item.get("outbound"):
+                # a reply written outside the app (phone, web client): it
+                # belongs in the thread, but the operator stays the team
+                conv, msg, is_new = ingest_outbound_external(
+                    db,
+                    channel=channel,
+                    external_id=item["external_id"],
+                    body=item["body"],
+                    contact_name=item.get("name"),
+                    contact_phone=item.get("phone"),
+                    message_external_id=item.get("message_id"),
+                    created_at=item.get("created_at"),
+                    attachments=item.get("attachments") or [],
+                    meta=item.get("meta") or {},
+                )
+                log.info("WhatsApp external outbound conv=%s msg=%s new=%s", conv.id, msg.id, is_new)
                 continue
             conv, msg, is_new = ingest_inbound(
                 db,

@@ -298,3 +298,75 @@ def recompute_conversation_metrics(db: Session, conversation: Conversation) -> N
     if msgs:
         conversation.last_message_at = _aware(msgs[-1].created_at)
     db.flush()
+
+
+def ingest_outbound_external(
+    db: Session,
+    *,
+    channel: Channel,
+    external_id: str,
+    body: str,
+    contact_name: Optional[str] = None,
+    contact_phone: Optional[str] = None,
+    message_external_id: Optional[str] = None,
+    attachments: Optional[list] = None,
+    created_at: Optional[datetime] = None,
+    meta: Optional[dict] = None,
+) -> tuple[Conversation, Message, bool]:
+    """Record a reply the operator sent outside the app (phone, web client).
+
+    The provider echoes those as `outgoing` events. They are not ours, so they
+    belong in the thread; attribution stays with the team (`author_type` is
+    `agent`) because the vendor does not say which operator wrote it.
+
+    Returns (conversation, message, is_new_conversation). Idempotent by
+    message id, like the inbound path.
+    """
+    if message_external_id:
+        existing = db.scalar(select(Message).where(Message.external_id == message_external_id))
+        if existing is not None:
+            conv = db.get(Conversation, existing.conversation_id)
+            return conv, existing, False
+
+    contact = get_or_create_contact(
+        db,
+        channel.type,
+        external_id,
+        workspace_id=channel.workspace_id,
+        name=contact_name,
+        phone=contact_phone,
+        meta=meta,
+    )
+
+    ts = _aware(created_at) or utcnow()
+    conv = find_active_conversation(db, channel.id, contact.id)
+    is_new = conv is None
+    if conv is None:
+        conv = Conversation(
+            workspace_id=channel.workspace_id,
+            channel_id=channel.id,
+            contact_id=contact.id,
+            subject=contact_name or contact.display_name,
+            status="open",
+            priority="normal",
+            tags=[],
+            meta={},
+            created_at=ts,
+        )
+        db.add(conv)
+        db.flush()
+        db.add(Event(conversation_id=conv.id, type="conversation_created", payload={}))
+
+    msg = record_outbound(
+        db,
+        conversation=conv,
+        body=body or "",
+        author=None,
+        author_type="agent",
+        attachments=attachments or [],
+        status="sent",
+        external_id=message_external_id,
+        created_at=ts,
+        meta={"external": True, **(meta or {})},
+    )
+    return conv, msg, is_new

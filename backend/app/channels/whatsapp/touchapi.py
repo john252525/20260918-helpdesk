@@ -5,7 +5,10 @@ Contract (verified against the live vendor API and its public collection):
     (alt: https://controller.touch-api.com/api)
   * auth             body carries `token` (API key) + `login` (account), plus
                      `source` ("whatsapp"). No Authorization header.
-  * outgoing         POST /sendMessage  {source, token, login, msg_to, msg_text}
+  * outgoing         POST /sendMessage. Prefer `msg={thread, text}` -- the vendor
+                     addresses chats by thread (`...@lid`), and a bare number in
+                     `msg_to` fails for LID contacts with "Chat not found".
+                     Delivery result lives in `results[].status`, not the top level.
                      -> {status, results:[{result:{item, thread, timestamp}}]}
   * account          POST /getInfoByToken {source, token, skipDetails}
                      -> {clients:[{login, activated, state, webhookUrls, ...}]}
@@ -106,25 +109,43 @@ class TouchApiProvider(WhatsAppProvider):
         if not self.token or not self.login:
             return SendResult(ok=False, status="failed",
                               error="Touch-API: не заданы token/login")
-        target = _digits(contact.phone or contact.external_id)
+
+        # Address by the chat thread the vendor gave us (`...@lid`, `...@c.us`).
+        # A bare number in `msg_to` yields "Chat not found or created" for LID
+        # contacts, which is most of them nowadays.
+        thread = str(((contact.meta or {}).get("thread") or "")).strip()
         try:
-            data = self._call("sendMessage", login=self.login,
-                              msg_to=target, msg_text=body)
+            if thread:
+                data = self._call("sendMessage", login=self.login,
+                                  msg={"thread": thread, "text": body})
+            else:
+                data = self._call("sendMessage", login=self.login,
+                                  msg_to=_digits(contact.phone or contact.external_id),
+                                  msg_text=body)
         except Exception as exc:  # noqa: BLE001
             return SendResult(ok=False, status="failed", error=str(exc))
 
+        # The vendor answers HTTP 200 with `status: "ok"` even when delivery
+        # failed: the real verdict is per-item, inside `results[]`. Checking
+        # only the top-level status reports a failed send as delivered.
         if data.get("status") == "error":
             return SendResult(ok=False, status="failed",
                               error=f"Touch-API: {self._error_text(data)}", raw=data)
 
-        external_id = None
         results = data.get("results") or []
-        if results and isinstance(results[0], dict):
-            result = results[0].get("result") or {}
-            external_id = result.get("item") or result.get("thread")
+        first = results[0] if results and isinstance(results[0], dict) else {}
+        if first.get("status") == "error" or first.get("error"):
+            reason = first.get("error") or "доставка не удалась"
+            return SendResult(ok=False, status="failed",
+                              error=f"Touch-API: {reason}", raw=data)
+
+        result = first.get("result") or {}
+        external_id = result.get("item") or result.get("thread")
+        if not external_id:
+            return SendResult(ok=False, status="failed",
+                              error="Touch-API: провайдер не вернул id сообщения", raw=data)
         return SendResult(ok=True, status="sent",
-                          external_id=str(external_id) if external_id else None,
-                          raw=data)
+                          external_id=str(external_id), raw=data)
 
     # --------------------------------------------------------------- inbound
     def normalize_inbound(self, raw: Any) -> list[dict]:
@@ -164,12 +185,11 @@ class TouchApiProvider(WhatsAppProvider):
         if not hook_type:
             return None
 
-        # incoming vs our own echo: `outgoing` marks messages the account sent.
-        # Echoes are skipped -- we already store them when the operator replies.
-        if outgoing:
-            return []
-
-        peer = _digits(raw.get("from") or raw.get("thread") or "")
+        # `outgoing` marks messages the account sent. Some are our own replies
+        # echoed back (skip those -- they are already stored), others were
+        # written from another device and must appear in the thread. The
+        # router tells the two apart by the stored message id.
+        peer = _peer_from(raw)
         if not peer:
             return []
 
@@ -187,6 +207,7 @@ class TouchApiProvider(WhatsAppProvider):
             "message_id": str(raw["item"]) if raw.get("item") else None,
             "created_at": created_at,
             "attachments": attachments,
+            "outbound": outgoing,
             "meta": {"raw": raw, "thread": raw.get("thread")},
         }]
 
@@ -283,6 +304,19 @@ class TouchApiProvider(WhatsAppProvider):
 
 
 # ---------------------------------------------------------------- helpers
+def _peer_from(raw: dict) -> str:
+    """The contact id behind a message event.
+
+    The chat `thread` is authoritative and identical for both directions
+    (`105205425295594@lid`); `from`/`to` swap depending on who wrote. Falls
+    back to those fields when no thread is present.
+    """
+    thread = str(raw.get("thread") or "")
+    if thread:
+        return _digits(thread.split("@")[0])
+    return _digits(raw.get("from") or raw.get("to") or "")
+
+
 def _digits(value: Any) -> str:
     """Touch-API wants E.164 without symbols; keep digits only."""
     return "".join(ch for ch in str(value or "") if ch.isdigit())
