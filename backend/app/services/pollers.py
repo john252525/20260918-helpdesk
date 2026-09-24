@@ -19,6 +19,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import Channel, Conversation
 from .ingest import get_or_create_channel, ingest_inbound
+from .vk_connect import pick_vk_token
 
 log = logging.getLogger("pollers")
 
@@ -273,7 +274,10 @@ class VKLongPoll(threading.Thread):
                 return False
             cfg = ch.config or {}
             self._group_id = str(cfg.get("group_id") or settings.vk_group_id or "")
-            self._token = str(cfg.get("access_token") or settings.vk_access_token or "")
+            # same token the adapter sends with: a group key works for both,
+            # the OAuth token only for receiving (ADR-023). Preferring the key
+            # also survives an OAuth token being revoked in the group settings.
+            self._token = pick_vk_token(cfg)
             # resume from the stored cursor: VK keeps a queue for a few hours,
             # so messages sent while the service was down are replayed
             if self._ts is None and cfg.get("long_poll_ts") is not None:

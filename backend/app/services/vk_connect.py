@@ -21,6 +21,23 @@ from ..models import Channel
 log = logging.getLogger("channels")
 
 
+def pick_vk_token(config: dict) -> str:
+    """Token to use for a VK channel.
+
+    A group key created in the community settings works for both receiving
+    and sending, so it wins whenever present. The OAuth token is the default
+    otherwise: VK accepts it for Long Poll but not for messages.* (see
+    ADR-023). Falls back to the environment for legacy channels.
+    """
+    cfg = config or {}
+    return str(
+        cfg.get("send_token")
+        or cfg.get("access_token")
+        or settings.vk_access_token
+        or ""
+    ).strip()
+
+
 def setup_vk_long_poll(cfg: dict) -> dict:
     """Enable Long Poll reception for a VK group.
 
