@@ -124,9 +124,32 @@ def start_auth(
     if provider.key != "touch-api":
         raise HTTPException(status_code=400, detail="Авторизация доступна только для Touch-API")
 
+    # keep the vendor webhook pointing at the current public origin: a channel
+    # created while PUBLIC_BASE_URL was localhost would otherwise never receive
+    desired = connect.webhook_url_for(ch, settings.public_base_url)
+    if (ch.config or {}).get("webhook_url") != desired:
+        old_url = (ch.config or {}).get("webhook_url")
+        if old_url:
+            provider.remove_webhook(old_url)
+        reg = provider.add_webhook(desired)
+        cfg = dict(ch.config or {})
+        cfg["webhook_url"] = desired
+        cfg["webhook_registered"] = reg.get("status") != "error"
+        if reg.get("status") == "error":
+            cfg["webhook_error"] = provider.error_text(reg)
+            log.warning("WhatsApp webhook re-register failed for %s: %s", ch.id, reg)
+        ch.config = cfg
+        db.commit()
+        db.refresh(ch)
+
     state = provider.start_account()
     if state.get("status") == "error":
-        raise HTTPException(status_code=502, detail=provider.error_text(state))
+        # "Trying to start existing account" just means it is already up;
+        # the vendor still hands out a QR, so carry on and let the snapshot
+        # report the real state. Anything else is surfaced to the caller.
+        msg = provider.error_text(state)
+        if "existing" not in msg.lower():
+            log.info("WhatsApp start for channel %s: %s", ch.id, msg)
 
     return _auth_snapshot(provider)
 
@@ -147,13 +170,18 @@ def auth_status(
 def _auth_snapshot(provider) -> dict:
     """Account state plus a QR the browser can render.
 
-    The vendor serves the QR as a PNG behind `/screenshot`; `/getQr` returns
-    the raw string. We ask for the string so the SPA can draw either a QR or
-    offer the image, without proxying binary through the API.
+    The vendor serves the QR as a PNG behind `/screenshot`, which this router
+    proxies so the token never reaches the browser. `getInfo` is the slow part
+    at this vendor (seconds, sometimes more), so a timeout there is reported
+    as "state unknown" rather than failing the whole step -- the QR is still
+    usable.
     """
     info = provider.account_info()
     if info.get("status") == "error":
-        raise HTTPException(status_code=502, detail=provider.error_text(info))
+        message = provider.error_text(info)
+        if "не ответил" not in message:
+            raise HTTPException(status_code=502, detail=message)
+        info = {}
 
     step = info.get("step") or {}
     snapshot = {

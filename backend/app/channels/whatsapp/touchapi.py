@@ -66,8 +66,10 @@ class TouchApiProvider(WhatsAppProvider):
     # account lifecycle calls make the vendor spin a session up or down and
     # can take much longer than a plain read; give them room instead of
     # surfacing a timeout as a 500
+    # getInfo is measured at 15s+ for some accounts, and it is polled while
+    # the admin scans the QR, so it belongs here too
     SLOW_METHODS = {"setState", "addAccount", "deleteAccount", "forceStop",
-                    "clearSession", "getNewProxy", "screenshot"}
+                    "clearSession", "getNewProxy", "screenshot", "getInfo"}
 
     def _call(self, method: str, timeout: int = 30, **params) -> dict:
         """POST a vendor method and always return a JSON-shaped dict.

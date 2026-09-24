@@ -563,6 +563,15 @@
                   onclick: () => openSendTokenModal(ch.id,
                     'VK не принимает токен этого канала для отправки. Вставьте ключ группы.'),
                 }, 'Добавить ключ'))
+            : null,
+          (ch.type === 'whatsapp' && ch.config && ch.config.provider === 'touch-api')
+            ? el('div', { class: 'sub' },
+                el('span', {}, 'Аккаунт: ' + (ch.config.login || '—')),
+                el('button', {
+                  class: 'btn btn-ghost btn-sm',
+                  style: 'margin-left:8px',
+                  onclick: () => openWhatsAppAuthModal(ch.id),
+                }, 'Войти в WhatsApp'))
             : null),
         el('div', { style: 'display:flex;align-items:center;gap:12px' },
           el('span', { class: 'muted' }, ch.enabled ? 'включён' : 'выключен'),
@@ -1256,18 +1265,18 @@
         'Аккаунтов по токену: ' + summary.count
         + (summary.activated ? ' · активных: ' + summary.activated : '')));
     }
-    const list = el('div', { class: 'vk-groups' });
+    const list = el('div', { class: 'wa-accounts' });
     for (const a of accounts) {
-      list.append(el('label', { class: 'vk-group' },
+      list.append(el('label', { class: 'wa-account' },
         el('input', { type: 'radio', name: 'ch-wa-account', value: a.login }),
-        el('span', { class: 'vk-group-name' }, a.login),
-        el('span', { class: 'vk-group-id muted' }, a.activated ? 'подключён' : 'не авторизован')));
+        el('span', { class: 'acc-login' }, a.login),
+        el('span', { class: 'acc-state' }, a.activated ? 'подключён' : 'не авторизован')));
     }
     // always allow creating a fresh account
-    list.append(el('label', { class: 'vk-group' },
+    list.append(el('label', { class: 'wa-account' },
       el('input', { type: 'radio', name: 'ch-wa-account', value: '__new__', checked: accounts.length === 0 }),
-      el('span', { class: 'vk-group-name' }, 'Создать новый аккаунт'),
-      el('span', { class: 'vk-group-id muted' }, 'логин сгенерируется')));
+      el('span', { class: 'acc-login' }, 'Создать новый аккаунт'),
+      el('span', { class: 'acc-state' }, 'логин сгенерируется')));
     box.append(list);
     box.append(el('div', { class: 'modal-actions' },
       el('button', { type: 'button', class: 'btn btn-primary', id: 'ch-wa-connect' },
@@ -1309,52 +1318,82 @@
         el('button', { type: 'button', class: 'btn btn-primary', id: 'wa-refresh' }, 'Обновить код')));
     showModal(body);
 
-    let timer = null;
-    const stop = () => { if (timer) clearInterval(timer); };
-    const refresh = async () => {
-      try {
-        await api('/channels/whatsapp/auth', { method: 'POST', body: { channel_id: channelId } });
-      } catch (e) { /* status below reports the truth */ }
-      await pollAuth();
+    let timer = null;          // poll loop
+    let busy = false;          // one request in flight at a time
+    let objectUrl = null;      // current QR blob
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    const finish = () => {
+      stop();
+      $('#modal-root').removeEventListener('click', onModalClick);
     };
-    const pollAuth = async () => {
+    const onModalClick = (e) => { if (e.target.dataset.close !== undefined) finish(); };
+    $('#modal-root').addEventListener('click', onModalClick);
+
+    async function loadQr() {
+      // the <img> cannot carry the Authorization header, so the picture is
+      // fetched as a blob and shown from an object URL. The vendor token
+      // still never reaches the browser.
+      try {
+        const res = await fetch(API_BASE + '/channels/whatsapp/qr-image?channel_id=' + channelId
+          + '&t=' + Date.now(), { headers: { Authorization: 'Bearer ' + state.token } });
+        if (!res.ok) return false;
+        const blob = await res.blob();
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        objectUrl = URL.createObjectURL(blob);
+        const qrBox = $('#wa-qr');
+        if (!qrBox) return true;
+        qrBox.innerHTML = '';
+        qrBox.append(el('img', { src: objectUrl, alt: 'QR' }));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function pollAuth() {
+      if (busy) return;           // getInfo can be slow; do not stack calls
+      busy = true;
       let st;
       try {
         st = await api('/channels/whatsapp/auth-status?channel_id=' + channelId);
       } catch (e) {
-        $('#wa-auth-state').hidden = false;
-        $('#wa-auth-state').className = 'modal-result err';
-        $('#wa-auth-state').textContent = e.message;
+        busy = false;
+        const box = $('#wa-auth-state');
+        if (box) { box.hidden = false; box.className = 'modal-result err'; box.textContent = e.message; }
         return;
       }
-      const qrBox = $('#wa-qr');
+      busy = false;
       const stateBox = $('#wa-auth-state');
+      if (!stateBox) { finish(); return; }
       if (st.activated) {
-        stop();
-        qrBox.innerHTML = '';
+        finish();
+        const qrBox = $('#wa-qr');
+        if (qrBox) qrBox.innerHTML = '';
         stateBox.hidden = false;
         stateBox.className = 'modal-result ok';
         stateBox.textContent = 'Аккаунт авторизован, приём сообщений работает.';
         await loadChannels();
         return;
       }
-      // token never reaches the browser: image is proxied by our backend
-      qrBox.innerHTML = '';
-      qrBox.append(el('img', {
-        src: '/api/v1/channels/whatsapp/qr-image?channel_id=' + channelId + '&t=' + Date.now(),
-        alt: 'QR',
-      }));
       stateBox.hidden = false;
       stateBox.className = 'modal-result';
       stateBox.textContent = st.step_message || 'Ожидаю сканирование…';
-    };
+      await loadQr();
+    }
+
+    async function refresh() {
+      const btn = $('#wa-refresh');
+      if (btn) { btn.disabled = true; btn.textContent = 'Обновляю…'; }
+      try {
+        await api('/channels/whatsapp/auth', { method: 'POST', body: { channel_id: channelId } });
+      } catch (e) { /* status below shows the truth */ }
+      await pollAuth();
+      if (btn) { btn.disabled = false; btn.textContent = 'Обновить код'; }
+    }
+
     $('#wa-refresh').addEventListener('click', refresh);
     refresh();
-    timer = setInterval(pollAuth, 5000);
-    // stop polling if the modal is dismissed
-    $('#modal-root').addEventListener('click', (e) => {
-      if (e.target.dataset.close !== undefined) stop();
-    });
+    timer = setInterval(pollAuth, 4000);
   }
 
   function channelField(name, label, placeholder, hint, type = 'text') {
