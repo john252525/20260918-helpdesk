@@ -15,6 +15,7 @@
     user: null,
     users: [],
     channels: [],
+    channelStatuses: {},
     conversations: [],
     convTotal: 0,
     activeId: null,
@@ -197,6 +198,35 @@
       sel.append(el('option', { value: ch.id }, `${CHANNEL_LABELS[ch.type] || ch.type} — ${ch.name}`));
     }
     renderChannels();
+    loadChannelStatuses();
+  }
+
+  /* Status of vendor-backed channels (Touch-API) is fetched in one batch and
+     painted into the list afterwards, so the channel page never waits on the
+     vendor. Per-channel refresh buttons re-request the same batch. */
+  async function loadChannelStatuses() {
+    const ids = state.channels
+      .filter((c) => c.type === 'whatsapp' && c.config && c.config.provider === 'touch-api')
+      .map((c) => c.id);
+    if (!ids.length) return;
+    try {
+      const r = await api('/channels/whatsapp/status', {
+        method: 'POST', body: { channel_ids: ids },
+      });
+      state.channelStatuses = r.statuses || {};
+      renderChannels();
+    } catch (e) { /* status is a nicety, not a blocker */ }
+  }
+
+  function waStatusLabel(st) {
+    if (!st) return 'нет данных';
+    if (st.error) return st.error;
+    if (st.maintenance) {
+      return st.maintenance === 'reset' ? 'сброс сессии…' : 'перезапуск…';
+    }
+    if (st.activated) return 'подключён';
+    if (st.step != null && st.step_message) return 'шаг ' + st.step + ' · ' + st.step_message;
+    return 'не авторизован';
   }
 
   async function loadUsers() {
@@ -565,13 +595,19 @@
                 }, 'Добавить ключ'))
             : null,
           (ch.type === 'whatsapp' && ch.config && ch.config.provider === 'touch-api')
-            ? el('div', { class: 'sub' },
-                el('span', {}, 'Аккаунт: ' + (ch.config.login || '—')),
+            ? el('div', { class: 'sub wa-status-line' },
+                el('span', { class: 'acc-login' }, 'Аккаунт: ' + (ch.config.login || '—')),
+                el('span', { class: 'wa-status-chip' },
+                  waStatusLabel(state.channelStatuses[String(ch.id)])),
                 el('button', {
                   class: 'btn btn-ghost btn-sm',
-                  style: 'margin-left:8px',
+                  title: 'Обновить статус',
+                  onclick: () => loadChannelStatuses(),
+                }, '↻'),
+                el('button', {
+                  class: 'btn btn-ghost btn-sm',
                   onclick: () => openWhatsAppAuthModal(ch.id),
-                }, 'Войти в WhatsApp'))
+                }, 'Управление'))
             : null),
         el('div', { style: 'display:flex;align-items:center;gap:12px' },
           el('span', { class: 'muted' }, ch.enabled ? 'включён' : 'выключен'),
@@ -1307,27 +1343,53 @@
   }
 
   function openWhatsAppAuthModal(channelId) {
+    const ch = state.channels.find((c) => c.id === channelId);
+    const login = (ch && ch.config && ch.config.login) || '—';
+
     const body = el('div', { class: 'modal-form' },
-      el('h2', {}, 'Вход в WhatsApp'),
+      el('h2', {}, 'Управление WhatsApp'),
+      el('div', { class: 'wa-account-info' },
+        el('span', { class: 'acc-login' }, 'Аккаунт: ' + login)),
       el('div', { class: 'modal-hint' },
         'Откройте WhatsApp → Связанные устройства → Привязать устройство и отсканируйте код.'),
       el('div', { id: 'wa-qr', class: 'wa-qr' }, el('div', { class: 'muted' }, 'Загружаю код…')),
       el('div', { id: 'wa-auth-state', class: 'modal-result', hidden: true }),
-      el('div', { class: 'modal-actions' },
+      el('div', { class: 'modal-actions modal-actions-wrap' },
         el('button', { type: 'button', class: 'btn btn-ghost', 'data-close': '' }, 'Позже'),
-        el('button', { type: 'button', class: 'btn btn-primary', id: 'wa-refresh' }, 'Обновить код')));
+        el('button', { type: 'button', class: 'btn btn-ghost', id: 'wa-restart' },
+          'Рестарт'),
+        el('button', { type: 'button', class: 'btn btn-ghost', id: 'wa-reset' },
+          'Сброс'),
+        el('button', { type: 'button', class: 'btn btn-primary', id: 'wa-refresh' },
+          'Обновить')));
     showModal(body);
 
-    let timer = null;          // poll loop
-    let busy = false;          // one request in flight at a time
-    let objectUrl = null;      // current QR blob
+    let timer = null;
+    let busy = false;
+    let objectUrl = null;
     const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
     const finish = () => {
       stop();
+      if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
       $('#modal-root').removeEventListener('click', onModalClick);
     };
     const onModalClick = (e) => { if (e.target.dataset.close !== undefined) finish(); };
     $('#modal-root').addEventListener('click', onModalClick);
+
+    function showQrLoader() {
+      const qrBox = $('#wa-qr');
+      if (!qrBox) return;
+      qrBox.innerHTML = '';
+      qrBox.append(el('div', { class: 'wa-loader' }));
+    }
+    function showStateLoader() {
+      const box = $('#wa-auth-state');
+      if (!box) return;
+      box.hidden = false;
+      box.className = 'modal-result';
+      box.innerHTML = '';
+      box.append(el('span', { class: 'wa-loader wa-loader-sm' }), ' Опрашиваю статус…');
+    }
 
     async function loadQr() {
       // the <img> cannot carry the Authorization header, so the picture is
@@ -1350,8 +1412,39 @@
       }
     }
 
+    function renderStatus(st) {
+      const stateBox = $('#wa-auth-state');
+      const qrBox = $('#wa-qr');
+      if (!stateBox) { finish(); return; }
+      if (st.activated) {
+        stop();
+        if (qrBox) qrBox.innerHTML = '';
+        stateBox.hidden = false;
+        stateBox.className = 'modal-result ok';
+        stateBox.textContent = 'Аккаунт авторизован, приём сообщений работает.';
+        loadChannels();
+        return;
+      }
+      if (st.maintenance) {
+        if (qrBox) { qrBox.innerHTML = ''; qrBox.append(el('div', { class: 'wa-loader' })); }
+        stateBox.hidden = false;
+        stateBox.className = 'modal-result';
+        stateBox.textContent = st.maintenance === 'reset'
+          ? 'Сбрасываю сессию, это занимает около минуты…'
+          : 'Перезапускаю сессию, это занимает около минуты…';
+        return;
+      }
+      stateBox.hidden = false;
+      stateBox.className = 'modal-result' + (st.maintenance_error ? ' err' : '');
+      stateBox.textContent = st.maintenance_error
+        || (st.step != null && st.step_message
+              ? ('Шаг ' + st.step + ' · ' + st.step_message)
+              : (st.step_message || 'Ожидаю сканирование…'));
+      loadQr();
+    }
+
     async function pollAuth() {
-      if (busy) return;           // getInfo can be slow; do not stack calls
+      if (busy) return;           // getInfo is slow; never stack calls
       busy = true;
       let st;
       try {
@@ -1363,35 +1456,45 @@
         return;
       }
       busy = false;
-      const stateBox = $('#wa-auth-state');
-      if (!stateBox) { finish(); return; }
-      if (st.activated) {
-        finish();
-        const qrBox = $('#wa-qr');
-        if (qrBox) qrBox.innerHTML = '';
-        stateBox.hidden = false;
-        stateBox.className = 'modal-result ok';
-        stateBox.textContent = 'Аккаунт авторизован, приём сообщений работает.';
-        await loadChannels();
-        return;
-      }
-      stateBox.hidden = false;
-      stateBox.className = 'modal-result';
-      stateBox.textContent = st.step_message || 'Ожидаю сканирование…';
-      await loadQr();
+      renderStatus(st);
     }
 
     async function refresh() {
+      // blank both panes first so the refresh is visibly happening
       const btn = $('#wa-refresh');
       if (btn) { btn.disabled = true; btn.textContent = 'Обновляю…'; }
+      showQrLoader();
+      showStateLoader();
       try {
         await api('/channels/whatsapp/auth', { method: 'POST', body: { channel_id: channelId } });
       } catch (e) { /* status below shows the truth */ }
       await pollAuth();
-      if (btn) { btn.disabled = false; btn.textContent = 'Обновить код'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
+    }
+
+    async function maintenance(action, label) {
+      const btn = action === 'reset' ? $('#wa-reset') : $('#wa-restart');
+      const other = action === 'reset' ? $('#wa-restart') : $('#wa-reset');
+      if (btn) { btn.disabled = true; btn.textContent = '…'; }
+      if (other) other.disabled = true;
+      showQrLoader();
+      showStateLoader();
+      try {
+        await api('/channels/whatsapp/maintenance', {
+          method: 'POST', body: { channel_id: channelId, action },
+        });
+      } catch (e) {
+        toast(e.message, 'err');
+      }
+      // the sequence takes ~1 min; pollAuth picks up the flags and the QR
+      await pollAuth();
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+      if (other) other.disabled = false;
     }
 
     $('#wa-refresh').addEventListener('click', refresh);
+    $('#wa-restart').addEventListener('click', () => maintenance('restart', 'Рестарт'));
+    $('#wa-reset').addEventListener('click', () => maintenance('reset', 'Сброс'));
     refresh();
     timer = setInterval(pollAuth, 4000);
   }

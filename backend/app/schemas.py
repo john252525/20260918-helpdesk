@@ -193,6 +193,21 @@ class WhatsAppConnect(BaseModel):
     workspace_id: Optional[int] = None
 
 
+class WhatsAppStatusRequest(BaseModel):
+    """Batch status request for the channel list."""
+    channel_ids: list[int] = []
+
+
+class WhatsAppMaintenance(BaseModel):
+    """Restart or reset the WhatsApp session of a channel.
+
+    `restart` = forceStop + getNewProxy + setState(true)
+    `reset`   = forceStop + clearSession + getNewProxy + setState(true)
+    """
+    channel_id: int
+    action: str = Field(pattern="^(restart|reset)$")
+
+
 class WhatsAppAuthRequest(BaseModel):
     """Start or query authorization of a connected WhatsApp channel."""
     channel_id: int

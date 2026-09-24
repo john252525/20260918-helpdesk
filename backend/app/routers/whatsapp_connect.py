@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import logging
 
+import threading
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..models import Channel, User
-from ..schemas import ChannelOut, WhatsAppAuthRequest, WhatsAppConnect, WhatsAppDiscover
+from ..schemas import (ChannelOut, WhatsAppAuthRequest, WhatsAppConnect,
+                       WhatsAppDiscover, WhatsAppMaintenance, WhatsAppStatusRequest)
 from ..security import require_admin
 from ..services import whatsapp_connect as connect
 from ..channels import whatsapp as whatsapp_providers
@@ -151,7 +155,7 @@ def start_auth(
         if "existing" not in msg.lower():
             log.info("WhatsApp start for channel %s: %s", ch.id, msg)
 
-    return _auth_snapshot(provider)
+    return _auth_snapshot(provider, ch)
 
 
 @router.get("/auth-status", summary="Состояние авторизации WhatsApp")
@@ -164,42 +168,42 @@ def auth_status(
     provider = whatsapp_providers.get_provider(ch)
     if provider.key != "touch-api":
         raise HTTPException(status_code=400, detail="Авторизация доступна только для Touch-API")
-    return _auth_snapshot(provider)
+    return _auth_snapshot(provider, ch)
 
 
-def _auth_snapshot(provider) -> dict:
-    """Account state plus a QR the browser can render.
+def _auth_snapshot(provider, channel) -> dict:
+    """Account state for the auth modal.
 
-    The vendor serves the QR as a PNG behind `/screenshot`, which this router
-    proxies so the token never reaches the browser. `getInfo` is the slow part
-    at this vendor (seconds, sometimes more), so a timeout there is reported
-    as "state unknown" rather than failing the whole step -- the QR is still
-    usable.
+    Uses the batch `status_map` rather than a per-account `getInfo`: the
+    single-account call is measured at ~30s at this vendor while the batch
+    covers every account of the token in ~5s, and the modal polls this.
     """
-    info = provider.account_info()
-    if info.get("status") == "error":
-        message = provider.error_text(info)
-        if "не ответил" not in message:
-            raise HTTPException(status_code=502, detail=message)
-        info = {}
-
-    step = info.get("step") or {}
-    snapshot = {
-        "login": info.get("login") or provider.login,
-        "activated": bool(info.get("activated")),
-        "state": bool(info.get("state")),
-        "step": step.get("value") if isinstance(step, dict) else None,
-        "step_message": step.get("message") if isinstance(step, dict) else None,
+    r = provider.status_map()
+    cfg = dict(channel.config or {})
+    base = {
+        "login": provider.login,
+        "activated": False,
+        "state": False,
+        "step": None,
+        "step_message": None,
+        "maintenance": cfg.get("maintenance"),
+        "maintenance_error": cfg.get("maintenance_error"),
         "qr": None,
         # NOTE: no image URL here -- the vendor's screenshot URL carries the
         # token in its query string, and the browser must never see it.
         # The SPA fetches /channels/whatsapp/qr-image instead.
     }
-    if not snapshot["activated"]:
-        qr = provider.qr_string()
-        if qr.get("status") != "error":
-            snapshot["qr"] = qr.get("value")
-    return snapshot
+    if not r.get("ok"):
+        base["error"] = r.get("detail") or "нет данных от провайдера"
+        return base
+    st = r["accounts"].get(str(provider.login)) or {}
+    base.update({
+        "activated": bool(st.get("activated")),
+        "state": bool(st.get("state")),
+        "step": st.get("step"),
+        "step_message": st.get("step_message"),
+    })
+    return base
 
 
 @router.get("/qr-image", summary="QR-код авторизации WhatsApp (прокси)")
@@ -234,3 +238,148 @@ def qr_image(
         raise HTTPException(status_code=404, detail="QR пока недоступен")
     return Response(content=resp.content, media_type=ctype,
                     headers={"Cache-Control": "no-store"})
+
+
+@router.post("/status", summary="Статусы аккаунтов WhatsApp (батч)")
+def statuses(
+    body: WhatsAppStatusRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """Status of every requested channel, grouped by vendor token.
+
+    One `getInfoByToken` per token covers all its channels, which keeps the
+    channel list responsive: a per-account `getInfo` is an order of magnitude
+    slower at this vendor.
+    """
+    channels: list[Channel] = []
+    for cid in body.channel_ids:
+        ch = db.get(Channel, cid)
+        if ch is None or ch.type != "whatsapp":
+            continue
+        if user.role != "superadmin" and ch.workspace_id != user.workspace_id:
+            continue
+        channels.append(ch)
+
+    by_token: dict = {}
+    for ch in channels:
+        cfg = ch.config or {}
+        if cfg.get("provider") != "touch-api" or not cfg.get("token"):
+            continue
+        by_token.setdefault(cfg["token"], []).append(ch)
+
+    result: dict = {}
+    for token, group in by_token.items():
+        provider = connect.provider_for(token)
+        r = provider.status_map()
+        if not r.get("ok"):
+            for ch in group:
+                result[str(ch.id)] = {"error": r.get("detail") or "нет данных"}
+            continue
+        accounts = r["accounts"]
+        for ch in group:
+            login = str((ch.config or {}).get("login") or "")
+            st = accounts.get(login, {})
+            result[str(ch.id)] = {
+                "login": login,
+                "state": st.get("state"),
+                "activated": st.get("activated"),
+                "step": st.get("step"),
+                "step_message": st.get("step_message"),
+                "maintenance": (ch.config or {}).get("maintenance"),
+                "maintenance_error": (ch.config or {}).get("maintenance_error"),
+            }
+    return {"statuses": result}
+
+
+@router.post("/maintenance", summary="Рестарт или сброс сессии WhatsApp")
+def maintenance(
+    body: WhatsAppMaintenance,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """Queue a maintenance sequence and return at once.
+
+    forceStop + getNewProxy + setState takes tens of seconds at this vendor
+    (setState alone was measured at 31s), far beyond a safe HTTP wait. The
+    work runs in a background thread; the channel list and the auth modal
+    report progress through `config.maintenance`.
+    """
+    ch = _load_channel(db, body.channel_id, user)
+    provider = whatsapp_providers.get_provider(ch)
+    if provider.key != "touch-api":
+        raise HTTPException(status_code=400, detail="Доступно только для Touch-API")
+
+    cfg = dict(ch.config or {})
+    if cfg.get("maintenance"):
+        raise HTTPException(status_code=409, detail="Обслуживание уже выполняется")
+
+    cfg["maintenance"] = body.action
+    cfg.pop("maintenance_error", None)
+    ch.config = cfg
+    db.commit()
+
+    threading.Thread(target=_run_maintenance, args=(ch.id, body.action), daemon=True).start()
+    return {"started": True, "action": body.action}
+
+
+# messages the vendor returns on the happy path of a restart; they are not
+# failures, so they must not be reported as such
+_BENIGN = ("qr code", "existing account")
+
+
+def _run_maintenance(channel_id: int, action: str) -> None:
+    """Execute the maintenance sequence outside the request cycle."""
+    db = SessionLocal()
+    try:
+        ch = db.get(Channel, channel_id)
+        if ch is None:
+            return
+        provider = whatsapp_providers.get_provider(ch)
+
+        calls = [("forceStop", provider.force_stop)]
+        if action == "reset":
+            calls.append(("clearSession", provider.clear_session))
+        calls.append(("getNewProxy", provider.get_new_proxy))
+        calls.append(("setState", provider.start_account))
+
+        errors: list[str] = []
+        for name, fn in calls:
+            try:
+                res = fn()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{name}: {exc}")
+                continue
+            if isinstance(res, dict) and res.get("status") == "error":
+                msg = provider.error_text(res)
+                if not any(b in msg.lower() for b in _BENIGN):
+                    errors.append(f"{name}: {msg}")
+
+        cfg = dict(ch.config or {})
+        cfg.pop("maintenance", None)
+        if errors:
+            cfg["maintenance_error"] = "; ".join(errors)
+        else:
+            cfg.pop("maintenance_error", None)
+        cfg["last_maintenance"] = {
+            "action": action,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        ch.config = cfg
+        db.commit()
+        log.info("WhatsApp maintenance %s for channel %s done, errors=%s",
+                 action, channel_id, errors or "none")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("WhatsApp maintenance failed")
+        try:
+            ch = db.get(Channel, channel_id)
+            if ch is not None:
+                cfg = dict(ch.config or {})
+                cfg.pop("maintenance", None)
+                cfg["maintenance_error"] = str(exc)
+                ch.config = cfg
+                db.commit()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        db.close()

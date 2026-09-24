@@ -216,6 +216,37 @@ class TouchApiProvider(WhatsAppProvider):
     def qr_string(self, login: str = "") -> dict:
         return self._call("getQr", login=login or self.login)
 
+    def force_stop(self, login: str = "") -> dict:
+        return self._call("forceStop", login=login or self.login)
+
+    def get_new_proxy(self, login: str = "") -> dict:
+        return self._call("getNewProxy", login=login or self.login)
+
+    def clear_session(self, login: str = "") -> dict:
+        return self._call("clearSession", login=login or self.login)
+
+    def status_map(self) -> dict:
+        """Statuses for every account of this token in one call.
+
+        A per-account `getInfo` costs ~30s at this vendor, while
+        `getInfoByToken(skipDetails=False)` returns steps for the whole token
+        in a few seconds -- the difference between a usable channel list and
+        a frozen one.
+        """
+        data = self._call("getInfoByToken", skipDetails=False)
+        if data.get("status") == "error":
+            return {"ok": False, "detail": self._error_text(data)}
+        out: dict = {}
+        for c in data.get("clients") or []:
+            step = c.get("step") or {}
+            out[str(c.get("login"))] = {
+                "state": bool(c.get("state")),
+                "activated": bool(c.get("activated")),
+                "step": step.get("value") if isinstance(step, dict) else None,
+                "step_message": step.get("message") if isinstance(step, dict) else None,
+            }
+        return {"ok": True, "accounts": out}
+
     @staticmethod
     def error_text(data: dict) -> str:
         """Readable message from a vendor error payload."""
