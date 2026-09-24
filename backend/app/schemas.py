@@ -169,6 +169,35 @@ class VKOAuthStart(BaseModel):
     workspace_id: Optional[int] = None
 
 
+class WhatsAppDiscover(BaseModel):
+    """List the accounts a Touch-API token can use.
+
+    `token` is the vendor API key; it is used for this call only and stored
+    later, when the admin picks an account and the channel is created.
+    """
+    token: str = Field(min_length=1)
+    source: str = "whatsapp"
+
+
+class WhatsAppConnect(BaseModel):
+    """Create a WhatsApp channel from the Touch-API wizard.
+
+    Either `login` names an existing account, or `create_new` asks the server
+    to mint one. The name is optional: the account id is used by default.
+    """
+    token: str = Field(min_length=1)
+    source: str = "whatsapp"
+    login: Optional[str] = None
+    create_new: bool = False
+    name: Optional[str] = Field(default=None, max_length=255)
+    workspace_id: Optional[int] = None
+
+
+class WhatsAppAuthRequest(BaseModel):
+    """Start or query authorization of a connected WhatsApp channel."""
+    channel_id: int
+
+
 class VKSendToken(BaseModel):
     """Group key used for outgoing VK messages.
 

@@ -522,3 +522,7 @@ td.num,th.num{text-align:right;padding-right:0}
 }
 /* VK channel that receives but cannot send (OAuth community token) */
 .warn-line{display:flex;align-items:center;gap:8px;color:var(--amber);margin-top:4px}
+
+/* ---------------- WhatsApp QR auth ---------------- */
+.wa-qr{display:grid;place-items:center;min-height:220px;margin:12px 0;background:var(--bg-subtle);border-radius:var(--radius-sm);padding:12px}
+.wa-qr img{width:220px;height:220px;image-rendering:pixelated}

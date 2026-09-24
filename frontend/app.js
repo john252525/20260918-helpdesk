@@ -179,6 +179,7 @@
 
   /* ---------------- boot ---------------- */
   async function boot() {
+    loadWhatsAppProviders();
     await Promise.all([loadChannels(), loadUsers()]);
     await loadConversations();
     if (state.pollTimer) clearInterval(state.pollTimer);
@@ -1166,6 +1167,196 @@
     });
   }
 
+  /* ---------------- WhatsApp providers ----------------
+     A `whatsapp` channel may sit behind different vendors. The list comes
+     from the backend, the chosen provider owns its own fields. The generic
+     form stays for "другой провайдер". */
+  let waProviders = null;
+
+  function whatsappProviders() {
+    if (waProviders && waProviders.length) return waProviders;
+    // sensible default until the backend responds
+    return [
+      { key: 'touch-api', title: 'Touch-API', supports_discovery: true },
+      { key: 'custom', title: 'Другой провайдер', supports_discovery: false },
+    ];
+  }
+
+  async function loadWhatsAppProviders() {
+    try {
+      const r = await api('/channels/whatsapp/providers');
+      if (r && r.providers && r.providers.length) waProviders = r.providers;
+    } catch (e) { /* keep defaults */ }
+  }
+
+  function renderWaProviderFields() {
+    const root = $('#ch-wa-body');
+    if (!root) return;
+    root.innerHTML = '';
+    const key = $('#ch-wa-provider').value;
+    applyChannelButtons(key === 'touch-api');
+    if (key === 'touch-api') {
+      root.append(
+        el('label', { class: 'field' },
+          el('span', {}, 'API-токен Touch-API'),
+          el('input', { id: 'ch-wa-token', placeholder: 'токен из личного кабинета' })),
+        el('div', { class: 'oauth-row' },
+          el('button', { type: 'button', class: 'btn btn-ghost', id: 'ch-wa-find' },
+            'Найти аккаунты')),
+        el('div', { id: 'ch-wa-accounts' }),
+        el('div', { class: 'modal-hint' },
+          'Сервис сам зарегистрирует вебхук и покажет QR для входа в WhatsApp. '
+          + 'Сначала проверяются аккаунты по токену: можно выбрать существующий '
+          + 'или создать новый.'));
+      $('#ch-wa-find').addEventListener('click', discoverWaAccounts);
+    } else {
+      root.append(
+        channelField('base_url', 'Адрес API провайдера', 'https://api.ваш-провайдер.ru'),
+        channelField('token', 'Токен провайдера', 'из личного кабинета провайдера'),
+        channelField('send_path', 'Путь отправки', '/sendMessage'),
+        el('div', { class: 'modal-hint' },
+          'Входящие придут на URL вебхука со страницы каналов. Провайдер должен отправлять туда POST с сообщениями.'),
+      );
+    }
+  }
+
+  function applyChannelButtons(isWizard) {
+    // the Touch-API wizard has its own action; the shared buttons would submit
+    // the generic form and confuse the flow
+    const validate = $('#ch-validate');
+    const submit = $('#ch-submit');
+    const nameInput = $('#ch-name');
+    if (validate) validate.hidden = isWizard;
+    if (submit) submit.hidden = isWizard;
+    if (nameInput) nameInput.required = !isWizard;
+  }
+
+  async function discoverWaAccounts() {
+    const token = ($('#ch-wa-token').value || '').trim();
+    const box = $('#ch-wa-accounts');
+    const btn = $('#ch-wa-find');
+    if (!token) { toast('Вставьте API-токен', 'err'); return; }
+    btn.disabled = true; btn.textContent = 'Ищу…';
+    box.innerHTML = '';
+    try {
+      const r = await api('/channels/whatsapp/discover', { method: 'POST', body: { token } });
+      renderWaAccounts(token, r.accounts || [], r.summary || {});
+    } catch (e) {
+      box.append(el('div', { class: 'modal-result err' }, e.message));
+    } finally {
+      btn.disabled = false; btn.textContent = 'Найти аккаунты';
+    }
+  }
+
+  function renderWaAccounts(token, accounts, summary) {
+    const box = $('#ch-wa-accounts');
+    box.innerHTML = '';
+    if (summary && summary.count !== undefined) {
+      box.append(el('div', { class: 'field-hint' },
+        'Аккаунтов по токену: ' + summary.count
+        + (summary.activated ? ' · активных: ' + summary.activated : '')));
+    }
+    const list = el('div', { class: 'vk-groups' });
+    for (const a of accounts) {
+      list.append(el('label', { class: 'vk-group' },
+        el('input', { type: 'radio', name: 'ch-wa-account', value: a.login }),
+        el('span', { class: 'vk-group-name' }, a.login),
+        el('span', { class: 'vk-group-id muted' }, a.activated ? 'подключён' : 'не авторизован')));
+    }
+    // always allow creating a fresh account
+    list.append(el('label', { class: 'vk-group' },
+      el('input', { type: 'radio', name: 'ch-wa-account', value: '__new__', checked: accounts.length === 0 }),
+      el('span', { class: 'vk-group-name' }, 'Создать новый аккаунт'),
+      el('span', { class: 'vk-group-id muted' }, 'логин сгенерируется')));
+    box.append(list);
+    box.append(el('div', { class: 'modal-actions' },
+      el('button', { type: 'button', class: 'btn btn-primary', id: 'ch-wa-connect' },
+        'Подключить')));
+    $('#ch-wa-connect').addEventListener('click', () => connectWaChannel(token));
+  }
+
+  async function connectWaChannel(token) {
+    const picked = document.querySelector('input[name="ch-wa-account"]:checked');
+    if (!picked) { toast('Выберите аккаунт', 'err'); return; }
+    const btn = $('#ch-wa-connect');
+    btn.disabled = true; btn.textContent = 'Подключаю…';
+    const body = { token };
+    if (picked.value === '__new__') body.create_new = true;
+    else body.login = picked.value;
+    const name = ($('#ch-name').value || '').trim();
+    if (name) body.name = name;
+    try {
+      const ch = await api('/channels/whatsapp/connect', { method: 'POST', body });
+      closeModal();
+      await loadChannels();
+      toast('Канал WhatsApp подключён');
+      openWhatsAppAuthModal(ch.id);
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Подключить';
+      toast(e.message, 'err');
+    }
+  }
+
+  function openWhatsAppAuthModal(channelId) {
+    const body = el('div', { class: 'modal-form' },
+      el('h2', {}, 'Вход в WhatsApp'),
+      el('div', { class: 'modal-hint' },
+        'Откройте WhatsApp → Связанные устройства → Привязать устройство и отсканируйте код.'),
+      el('div', { id: 'wa-qr', class: 'wa-qr' }, el('div', { class: 'muted' }, 'Загружаю код…')),
+      el('div', { id: 'wa-auth-state', class: 'modal-result', hidden: true }),
+      el('div', { class: 'modal-actions' },
+        el('button', { type: 'button', class: 'btn btn-ghost', 'data-close': '' }, 'Позже'),
+        el('button', { type: 'button', class: 'btn btn-primary', id: 'wa-refresh' }, 'Обновить код')));
+    showModal(body);
+
+    let timer = null;
+    const stop = () => { if (timer) clearInterval(timer); };
+    const refresh = async () => {
+      try {
+        await api('/channels/whatsapp/auth', { method: 'POST', body: { channel_id: channelId } });
+      } catch (e) { /* status below reports the truth */ }
+      await pollAuth();
+    };
+    const pollAuth = async () => {
+      let st;
+      try {
+        st = await api('/channels/whatsapp/auth-status?channel_id=' + channelId);
+      } catch (e) {
+        $('#wa-auth-state').hidden = false;
+        $('#wa-auth-state').className = 'modal-result err';
+        $('#wa-auth-state').textContent = e.message;
+        return;
+      }
+      const qrBox = $('#wa-qr');
+      const stateBox = $('#wa-auth-state');
+      if (st.activated) {
+        stop();
+        qrBox.innerHTML = '';
+        stateBox.hidden = false;
+        stateBox.className = 'modal-result ok';
+        stateBox.textContent = 'Аккаунт авторизован, приём сообщений работает.';
+        await loadChannels();
+        return;
+      }
+      // token never reaches the browser: image is proxied by our backend
+      qrBox.innerHTML = '';
+      qrBox.append(el('img', {
+        src: '/api/v1/channels/whatsapp/qr-image?channel_id=' + channelId + '&t=' + Date.now(),
+        alt: 'QR',
+      }));
+      stateBox.hidden = false;
+      stateBox.className = 'modal-result';
+      stateBox.textContent = st.step_message || 'Ожидаю сканирование…';
+    };
+    $('#wa-refresh').addEventListener('click', refresh);
+    refresh();
+    timer = setInterval(pollAuth, 5000);
+    // stop polling if the modal is dismissed
+    $('#modal-root').addEventListener('click', (e) => {
+      if (e.target.dataset.close !== undefined) stop();
+    });
+  }
+
   function channelField(name, label, placeholder, hint, type = 'text') {
     return el('label', { class: 'field' },
       el('span', {}, label),
@@ -1177,6 +1368,9 @@
     const type = $('#ch-type').value;
     const root = $('#ch-fields');
     root.innerHTML = '';
+    // the Touch-API wizard hides the shared buttons; any other branch needs
+    // them back, otherwise they stay hidden after switching provider
+    applyChannelButtons(false);
 
     if (type === 'vk') {
       root.append(
@@ -1216,12 +1410,14 @@
       $('#ch-vk-oauth').addEventListener('click', startVkOAuth);
     } else if (type === 'whatsapp') {
       root.append(
-        channelField('base_url', 'Адрес API провайдера', 'https://api.ваш-провайдер.ru'),
-        channelField('token', 'Токен провайдера', 'из личного кабинета провайдера'),
-        channelField('send_path', 'Путь отправки', '/sendMessage'),
-        el('div', { class: 'modal-hint' },
-          'Входящие придут на URL вебхука со страницы каналов. Провайдер должен отправлять туда POST с сообщениями.'),
+        el('label', { class: 'field' },
+          el('span', {}, 'Провайдер'),
+          el('select', { id: 'ch-wa-provider', onchange: () => renderWaProviderFields() },
+            ...whatsappProviders().map((p) =>
+              el('option', { value: p.key }, p.title)))),
+        el('div', { id: 'ch-wa-body' }),
       );
+      renderWaProviderFields();
     } else {
       root.append(
         channelField('smtp_host', 'SMTP сервер (исходящие)', 'smtp.вашдомен.ru'),
@@ -1236,6 +1432,11 @@
 
   function collectChannelConfig(type) {
     const cfg = {};
+    // WhatsApp has two shapes: the generic form (below) and the Touch-API
+    // wizard, which posts through its own endpoint and never reaches here.
+    const provider = type === 'whatsapp' && $('#ch-wa-provider')
+      ? $('#ch-wa-provider').value : 'custom';
+    if (type === 'whatsapp' && provider === 'touch-api') return cfg;
     const names = type === 'vk'
       ? ['group_id', 'access_token']
       : type === 'whatsapp'

@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import Channel, User, WebhookLog
+from ..models import Channel, Conversation, Message, User, WebhookLog
 from ..security import get_current_user
 from ..services.ingest import ingest_inbound
+from ..channels import whatsapp as whatsapp_providers
 
 log = logging.getLogger("webhooks")
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -76,7 +77,20 @@ async def whatsapp_webhook(channel_id: int, secret: str, request: Request,
             raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
     try:
-        for item in _normalize_whatsapp(raw):
+        # the vendor of a `whatsapp` channel is chosen by config.provider;
+        # unknown/missing means the generic form, so old channels keep working
+        provider = whatsapp_providers.get_provider(channel)
+        items = provider.normalize_inbound(raw)
+        if items is None:
+            # the provider did not recognise the payload; the tolerant generic
+            # normalizer may still make sense of it. An empty list, by
+            # contrast, means the event was understood and skipped on purpose.
+            items = _normalize_whatsapp(raw)
+
+        for item in items:
+            if item.get("status_update"):
+                _apply_message_status(db, channel, item)
+                continue
             conv, msg, is_new = ingest_inbound(
                 db,
                 channel=channel,
@@ -99,6 +113,33 @@ async def whatsapp_webhook(channel_id: int, secret: str, request: Request,
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {"ok": True, "processed": entry.processed}
+
+
+def _apply_message_status(db: Session, channel: Channel, item: dict) -> None:
+    """Update an existing message from a delivery-status webhook.
+
+    Providers report progress against the message id they returned on send.
+    Only an advance is applied: never downgrade `read` back to `sent`.
+    """
+    ext = item.get("message_id")
+    if not ext:
+        return
+    msg = db.scalar(
+        select(Message).where(Message.external_id == str(ext)).order_by(Message.id.desc())
+    )
+    if msg is None:
+        return
+    conversation = db.get(Conversation, msg.conversation_id)
+    if conversation is None or conversation.channel_id != channel.id:
+        return
+    rank = {"queued": 0, "pending": 0, "sent": 1, "delivered": 2, "read": 3, "failed": 3}
+    current = rank.get(msg.status, 0)
+    incoming = item.get("status") or ""
+    if rank.get(incoming, -1) > current:
+        msg.status = incoming
+    if incoming == "failed":
+        msg.status = "failed"
+    db.flush()
 
 
 def _pick(d: dict, *keys, default=None):

@@ -1,6 +1,6 @@
-"""WhatsApp adapter.
+"""Custom (generic) WhatsApp provider.
 
-Contract (per provider docs):
+The original adapter for a vendor-agnostic HTTP contract:
   * incoming -> provider calls our webhook  POST /api/v1/webhooks/whatsapp/{channel_id}
   * outgoing -> we call  POST {base_url}{send_path}
         headers: Authorization: Bearer {token}
@@ -15,15 +15,18 @@ from typing import Any, Optional
 
 import httpx
 
-from ..config import settings
-from ..models import Channel, Contact, Conversation
-from .base import ChannelAdapter, SendResult
+from ...config import settings
+from ...models import Channel, Contact, Conversation
+from .base import WhatsAppProvider
+from ..base import SendResult
 
 
-class WhatsAppAdapter(ChannelAdapter):
-    type = "whatsapp"
+class CustomProvider(WhatsAppProvider):
+    key = "custom"
+    title = "Другой провайдер"
+    supports_discovery = False
 
-    def __init__(self, channel: Channel, config: dict):
+    def __init__(self, channel: Channel = None, config: dict = None):
         super().__init__(channel, config)
         self.base_url = (self.config.get("base_url") or settings.whatsapp_base_url or "").rstrip("/")
         self.token = self.config.get("token") or settings.whatsapp_token or ""

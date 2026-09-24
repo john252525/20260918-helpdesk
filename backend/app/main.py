@@ -16,6 +16,7 @@ from .routers import (
     metrics,
     users,
     vk_oauth,
+    whatsapp_connect,
     webhooks,
     workspaces,
 )
@@ -96,7 +97,7 @@ app.add_middleware(
 )
 
 api_prefix = "/api/v1"
-for module in (auth, users, vk_oauth, channels, contacts, conversations, metrics, webhooks, workspaces):
+for module in (auth, users, vk_oauth, whatsapp_connect, channels, contacts, conversations, metrics, webhooks, workspaces):
     app.include_router(module.router, prefix=api_prefix)
 
 
