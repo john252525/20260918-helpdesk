@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # VK OAuth (Authorization Code Flow). The app secret lives only here,
     # never in the browser. redirect_uri must be registered on dev.vk.com;
     # empty value means "build it from public_base_url".
-    vk_app_id: str = "54786450"
+    vk_app_id: str = ""
     vk_client_secret: str = ""
     vk_oauth_redirect_uri: str = ""
     vk_oauth_frontend_url: str = "/app/"

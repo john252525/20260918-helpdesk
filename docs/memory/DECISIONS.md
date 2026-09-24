@@ -339,7 +339,7 @@ dev.vk.com: user-токен через OAuth плюс `groups.get?filter=admin` 
 сообществ. На практике оказалось неверно:
 
 - старое приложение отключено (`application is disabled`);
-- приложение VK ID (`54786450`) — другого типа: `scope=manage` без `group_ids`
+- приложение VK ID (идентификатор в `VK_APP_ID`) — другого типа: `scope=manage` без `group_ids`
   даёт `Security Error`, а право `groups` оно запрашивать не умеет вообще
   (VK выдаёт его только по заявке в `devsupport@corp.vk.com`).
 
