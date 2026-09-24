@@ -188,6 +188,37 @@ class TouchApiProvider(WhatsAppProvider):
             "meta": {"raw": raw, "thread": raw.get("thread")},
         }]
 
+    # -------------------------------------------------------- lifecycle api
+    # Thin public wrappers so routers never reach into `_call` directly.
+    def add_account(self, login: str) -> dict:
+        return self._call("addAccount", login=login)
+
+    def delete_account(self, login: str) -> dict:
+        return self._call("deleteAccount", login=login)
+
+    def account_info(self, login: str = "") -> dict:
+        return self._call("getInfo", login=login or self.login)
+
+    def start_account(self, login: str = "") -> dict:
+        return self._call("setState", login=login or self.login, setState=True)
+
+    def stop_account(self, login: str = "") -> dict:
+        return self._call("setState", login=login or self.login, setState=False)
+
+    def add_webhook(self, url: str, login: str = "") -> dict:
+        return self._call("addWebhook", login=login or self.login, webhookUrl=url)
+
+    def remove_webhook(self, url: str, login: str = "") -> dict:
+        return self._call("deleteWebhook", login=login or self.login, webhookUrl=url)
+
+    def qr_string(self, login: str = "") -> dict:
+        return self._call("getQr", login=login or self.login)
+
+    @staticmethod
+    def error_text(data: dict) -> str:
+        """Readable message from a vendor error payload."""
+        return TouchApiProvider._error_text(data)
+
     # ------------------------------------------------------------- discovery
     def discover(self) -> dict:
         """List the accounts available for this token."""

@@ -42,7 +42,7 @@
 
 ## Передача следующему агенту
 
-Работа шла в итерациях 009–012: подключение VK OAuth, community-токен, ключ группы для ответов, затем мультипровайдерный канал WhatsApp (щенок Touch-API). Ключевые правки — в `backend/app/channels/whatsapp/`, `backend/app/routers/whatsapp_connect.py`, `backend/app/services/whatsapp_connect.py`, `backend/app/routers/webhooks.py`. Решения — ADR-021…024. Ранее: подключение группы ВК через VK OAuth, переход на community-токен, отдельный ключ группы для ответов. Затронуты `backend/app/services/vk_oauth.py`, `backend/app/services/vk_connect.py`, `backend/app/routers/vk_oauth.py`, `backend/app/channels/vk.py`, `backend/app/services/pollers.py`, `frontend/app.js` и `frontend/styles.css`. Решения — ADR-021, ADR-022, ADR-023 в `DECISIONS.md`. Настройки приложения и секреты — только в `backend/.env` (не в репозитории).
+Работа шла в итерациях 009–012. Сначала VK: подключение группы через OAuth, переход на community-токен, отдельный ключ группы для ответов (`backend/app/services/vk_oauth.py`, `backend/app/services/vk_connect.py`, `backend/app/routers/vk_oauth.py`, `backend/app/channels/vk.py`, `backend/app/services/pollers.py`, ADR-021…023). Затем мультипровайдерный канал WhatsApp с вендором Touch-API: визард подключения и приём через провайдера (`backend/app/channels/whatsapp/`, `backend/app/routers/whatsapp_connect.py`, `backend/app/services/whatsapp_connect.py`, `backend/app/routers/webhooks.py`, ADR-024). Правки интерфейса — в `frontend/app.js` и `frontend/styles.css`. Настройки и секреты — только в `backend/.env` (не в репозитории).
 
 Что читать первым при старте — как обычно, `AGENTS.md`, затем `PROJECT.md` и этот файл.
 

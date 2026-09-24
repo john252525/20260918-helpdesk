@@ -63,10 +63,10 @@ def connect_channel(
     login = (body.login or "").strip()
     if body.create_new or not login:
         login = connect.generate_login()
-        created = provider._call("addAccount", login=login)
+        created = provider.add_account(login)
         if created.get("status") == "error":
             raise HTTPException(status_code=502,
-                                detail=f"Не удалось создать аккаунт: {provider._error_text(created)}")
+                                detail=f"Не удалось создать аккаунт: {provider.error_text(created)}")
         log.info("Touch-API account created: %s", login)
     else:
         # make sure the account really belongs to this token before saving it
@@ -91,10 +91,10 @@ def connect_channel(
     # register our webhook so incoming messages start arriving
     url = connect.webhook_url_for(ch, settings.public_base_url)
     cfg_provider = whatsapp_providers.get_provider(ch)
-    reg = cfg_provider._call("addWebhook", login=login, webhookUrl=url)
+    reg = cfg_provider.add_webhook(url, login)
     if reg.get("status") == "error":
         ch.config = {**(ch.config or {}), "webhook_registered": False,
-                     "webhook_error": cfg_provider._error_text(reg)}
+                     "webhook_error": cfg_provider.error_text(reg)}
         log.warning("Touch-API webhook not registered for channel %s: %s", ch.id, reg)
     else:
         ch.config = {**(ch.config or {}), "webhook_registered": True, "webhook_url": url}
@@ -124,9 +124,9 @@ def start_auth(
     if provider.key != "touch-api":
         raise HTTPException(status_code=400, detail="Авторизация доступна только для Touch-API")
 
-    state = provider._call("setState", login=provider.login, setState=True)
+    state = provider.start_account()
     if state.get("status") == "error":
-        raise HTTPException(status_code=502, detail=provider._error_text(state))
+        raise HTTPException(status_code=502, detail=provider.error_text(state))
 
     return _auth_snapshot(provider)
 
@@ -151,9 +151,9 @@ def _auth_snapshot(provider) -> dict:
     the raw string. We ask for the string so the SPA can draw either a QR or
     offer the image, without proxying binary through the API.
     """
-    info = provider._call("getInfo", login=provider.login)
+    info = provider.account_info()
     if info.get("status") == "error":
-        raise HTTPException(status_code=502, detail=provider._error_text(info))
+        raise HTTPException(status_code=502, detail=provider.error_text(info))
 
     step = info.get("step") or {}
     snapshot = {
@@ -168,7 +168,7 @@ def _auth_snapshot(provider) -> dict:
         # The SPA fetches /channels/whatsapp/qr-image instead.
     }
     if not snapshot["activated"]:
-        qr = provider._call("getQr", login=provider.login)
+        qr = provider.qr_string()
         if qr.get("status") != "error":
             snapshot["qr"] = qr.get("value")
     return snapshot
