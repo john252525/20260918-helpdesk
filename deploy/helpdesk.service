@@ -1,16 +1,40 @@
 [Unit]
 Description=Helpdesk API (WhatsApp / VK / Email, API-first)
-After=network-online.target
+After=network-online.target docker.service
 Wants=network-online.target
+# the database lives in a Docker container; starting before Docker is up
+# means the app cannot connect and dies on startup
+Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/20260918-helpdesk
 Environment=PYTHONUNBUFFERED=1
+
+# Make sure Postgres is up before the app starts. `docker start` is a no-op
+# when the container already runs, so this is safe on every boot. The loop
+# waits for the port, because `docker start` returns before the database
+# accepts connections.
+ExecStartPre=/bin/sh -c 'docker start helpdesk-postgres >/dev/null 2>&1 || true'
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do nc -z 127.0.0.1 18401 && exit 0; sleep 0.5; done; echo "helpdesk-postgres did not open port 18401" >&2; exit 1'
+
 ExecStart=/opt/20260918-helpdesk/.venv/bin/uvicorn backend.app.main:app --host 0.0.0.0 --port 8091
+
+# A restart loop must not run forever: 10s between attempts, and systemd
+# gives up after 5 failures in 5 minutes (StartLimit* above). The previous
+# values (3s / default limit) let the service fail ~47 000 times, filling
+# the disk with log lines while the database was down.
 Restart=always
-RestartSec=3
+RestartSec=10
+
+# Keep the app from dragging the whole host into OOM: it shares a 3.8 GB
+# machine with several other projects.
+MemoryHigh=512M
+MemoryMax=768M
+
 StandardOutput=append:/var/log/helpdesk.log
 StandardError=append:/var/log/helpdesk.log
 
